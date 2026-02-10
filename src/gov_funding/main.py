@@ -15,7 +15,8 @@ from apscheduler.triggers.cron import CronTrigger
 from .analyzers import filter_with_bedrock, keyword_filter
 from .crawlers import BizinfoCrawler, NipaCrawler
 from .notifiers import send_gmail_notification, send_slack_notification
-from .storage import NotificationPayload, S3Storage, Source, deduplicate_announcements
+from .storage import NotificationPayload, Source, deduplicate_announcements
+from .storage.vector_storage import S3VectorStorage
 from .utils import get_config, logger
 
 # Playwright is optional
@@ -37,17 +38,19 @@ scheduler_logger = logging.getLogger(__name__)
 async def run_workflow() -> dict:
     """메인 워크플로우 실행
 
-    1. K-Startup, 기업마당에서 공고 크롤링
+    1. K-Startup, 기업마당, NIPA에서 공고 크롤링
     2. 중복 제거 및 병합
     3. 키워드 + Bedrock 필터링
-    4. S3 스냅샷 비교로 신규/마감임박 식별
-    5. Slack/Gmail 알림 전송
+    4. S3 Vectors 비교로 신규/마감임박 식별
+    5. 벡터 임베딩 저장
+    6. Slack/Gmail 알림 전송
 
     Returns:
         실행 결과 요약
     """
     config = get_config()
-    storage = S3Storage()
+    vector_storage = S3VectorStorage()
+    vector_storage.ensure_index()
 
     result = {
         "timestamp": datetime.now().isoformat(),
@@ -125,33 +128,44 @@ async def run_workflow() -> dict:
         result["errors"].append(f"Bedrock filtering error: {str(e)}")
         final_filtered = keyword_filtered  # Bedrock 실패 시 키워드 필터 결과 사용
 
-    # 5. 스냅샷 비교 (출처별)
-    kstartup_filtered = [a for a in final_filtered if a.source == Source.KSTARTUP]
-    bizinfo_filtered = [a for a in final_filtered if a.source == Source.BIZINFO]
-    nipa_filtered = [a for a in final_filtered if a.source == Source.NIPA]
-
+    # 5. S3 Vectors 비교 (신규/마감임박 식별)
     combined_payload = NotificationPayload()
 
-    for source, filtered_list in [
-        (Source.KSTARTUP, kstartup_filtered),
-        (Source.BIZINFO, bizinfo_filtered),
-        (Source.NIPA, nipa_filtered),
-    ]:
-        if not filtered_list:
-            continue
+    try:
+        existing_keys = vector_storage.get_existing_keys()
+        logger.info(f"기존 벡터 수: {len(existing_keys)}건")
 
-        new_snapshot, payload = storage.compare_snapshots(
-            filtered_list,
-            source,
-            deadline_alert_days=config.deadline_alert_days,
-        )
+        # 신규 공고 식별
+        for ann in final_filtered:
+            key = f"{ann.source.value}_{ann.id}"
+            if key not in existing_keys:
+                combined_payload.new_announcements.append(ann)
 
-        # 스냅샷 저장
-        storage.save_snapshot(new_snapshot)
+        # 마감임박 식별 (기존 공고 중 d_day 변경)
+        existing_filtered_keys = [
+            f"{a.source.value}_{a.id}"
+            for a in final_filtered
+            if f"{a.source.value}_{a.id}" in existing_keys
+        ]
+        if existing_filtered_keys:
+            prev_metadata = vector_storage.get_vectors_metadata(existing_filtered_keys)
+            for ann in final_filtered:
+                key = f"{ann.source.value}_{ann.id}"
+                if key in prev_metadata:
+                    prev_d_day = prev_metadata[key].get("d_day", -1)
+                    if ann.d_day is not None and 0 < ann.d_day <= config.deadline_alert_days:
+                        if prev_d_day == -1 or prev_d_day > config.deadline_alert_days:
+                            combined_payload.deadline_soon.append(ann)
 
-        # 알림 페이로드 병합
-        combined_payload.new_announcements.extend(payload.new_announcements)
-        combined_payload.deadline_soon.extend(payload.deadline_soon)
+        # 벡터 저장 (전체 upsert - 신규+기존 모두 업데이트)
+        vector_storage.upsert_announcements(final_filtered)
+
+    except Exception as e:
+        logger.error(f"벡터 저장/비교 오류: {e}")
+        result["errors"].append(f"Vector storage error: {str(e)}")
+        # 벡터 저장 실패 시에도 모든 공고를 신규로 취급
+        if not combined_payload.new_announcements:
+            combined_payload.new_announcements = list(final_filtered)
 
     # 정확도순 정렬 (높은 점수가 먼저)
     combined_payload.new_announcements.sort(

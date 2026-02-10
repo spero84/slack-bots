@@ -5,11 +5,9 @@ import logging
 import os
 import re
 import subprocess
-import time
 import uuid
 
 import boto3
-from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -40,93 +38,137 @@ CLAUDE_PATH = os.path.join(HOME_DIR, ".local", "bin", "claude")
 
 # Gov-Funding Q&A 설정
 GOV_FUNDING_CHANNEL_ID = os.environ.get("GOV_FUNDING_CHANNEL_ID", "")
-S3_BUCKET = os.environ.get("S3_BUCKET", "")
+S3_VECTOR_BUCKET = os.environ.get("S3_BUCKET", "gov-funding-monitor-snapshots")
 AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
+BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "us-west-2")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0")
 
-# Gov-Funding 스냅샷 캐시 (TTL 1시간)
-_gov_funding_cache = {"data": None, "fetched_at": 0, "ttl": 3600}
+# S3 Vectors / Bedrock 클라이언트 (lazy init)
+_s3v_client = None
+_bedrock_embed_client = None
 
 
-def get_gov_funding_context():
-    """S3에서 최신 gov-funding 스냅샷을 가져와 컨텍스트 문자열로 반환 (1시간 캐시)"""
-    now = time.time()
+def _get_s3v_client():
+    global _s3v_client
+    if _s3v_client is None:
+        _s3v_client = boto3.client("s3vectors", region_name=AWS_REGION)
+    return _s3v_client
 
-    # 캐시 히트
-    if _gov_funding_cache["data"] is not None and (now - _gov_funding_cache["fetched_at"]) < _gov_funding_cache["ttl"]:
-        logger.info("Gov-funding 캐시 히트")
-        return _gov_funding_cache["data"]
 
-    if not S3_BUCKET:
-        logger.warning("S3_BUCKET 미설정 - gov-funding 컨텍스트 스킵")
+def _get_bedrock_embed_client():
+    global _bedrock_embed_client
+    if _bedrock_embed_client is None:
+        _bedrock_embed_client = boto3.client("bedrock-runtime", region_name=BEDROCK_REGION)
+    return _bedrock_embed_client
+
+
+def get_gov_funding_context(question):
+    """사용자 질문으로 S3 Vectors 검색 → 관련 공고 컨텍스트 반환"""
+    if not S3_VECTOR_BUCKET:
+        logger.warning("S3_VECTOR_BUCKET 미설정 - gov-funding 컨텍스트 스킵")
         return ""
 
-    logger.info("Gov-funding S3 스냅샷 fetch 시작")
-    s3_client = boto3.client("s3", region_name=AWS_REGION)
-    all_announcements = []
+    try:
+        # 1. 질문 임베딩
+        logger.info(f"Gov-funding 벡터 검색 시작: {question[:50]}")
+        bedrock = _get_bedrock_embed_client()
+        resp = bedrock.invoke_model(
+            modelId=EMBEDDING_MODEL,
+            body=json.dumps({"inputText": question, "dimensions": 1024}),
+        )
+        embedding = json.loads(resp["body"].read())["embedding"]
 
-    for source in ["kstartup", "bizinfo", "nipa"]:
-        prefix = f"snapshots/{source}/"
-        try:
-            response = s3_client.list_objects_v2(
-                Bucket=S3_BUCKET, Prefix=prefix, MaxKeys=1000
-            )
-            if "Contents" not in response:
-                logger.info(f"{source} 스냅샷 없음")
-                continue
+        # 2. 메타데이터 필터 구성 (키워드 검색)
+        metadata_filter = _extract_metadata_filter(question)
 
-            # 최신 파일 선택
-            objects = sorted(response["Contents"], key=lambda x: x["LastModified"], reverse=True)
-            latest_key = objects[0]["Key"]
+        # 3. 벡터 유사도 검색
+        s3v = _get_s3v_client()
+        kwargs = {
+            "vectorBucketName": S3_VECTOR_BUCKET,
+            "indexName": "announcements",
+            "queryVector": {"float32": embedding},
+            "topK": 15,
+            "returnMetadata": True,
+            "returnDistance": True,
+        }
+        if metadata_filter:
+            kwargs["filter"] = metadata_filter
 
-            obj = s3_client.get_object(Bucket=S3_BUCKET, Key=latest_key)
-            data = json.loads(obj["Body"].read().decode("utf-8"))
-            announcements = data.get("announcements", [])
-            all_announcements.extend(announcements)
-            logger.info(f"{source} 스냅샷 로드: {len(announcements)}건 ({latest_key})")
-        except ClientError as e:
-            logger.error(f"{source} S3 접근 에러: {e}")
-            continue
-        except Exception as e:
-            logger.error(f"{source} 스냅샷 파싱 에러: {e}")
-            continue
+        results = s3v.query_vectors(**kwargs)
+        vectors = results.get("vectors", [])
+        logger.info(f"벡터 검색 결과: {len(vectors)}건 (필터: {metadata_filter})")
 
-    context = _format_announcements_context(all_announcements)
+        # 4. 결과가 적으면 필터 없이 재검색
+        if len(vectors) < 3 and metadata_filter:
+            logger.info("결과 부족 - 필터 없이 재검색")
+            kwargs.pop("filter", None)
+            results = s3v.query_vectors(**kwargs)
+            vectors = results.get("vectors", [])
+            logger.info(f"재검색 결과: {len(vectors)}건")
 
-    # 캐시 저장 (데이터 없으면 5분 TTL)
-    _gov_funding_cache["data"] = context
-    _gov_funding_cache["fetched_at"] = now
-    if not all_announcements:
-        _gov_funding_cache["ttl"] = 300
-    else:
-        _gov_funding_cache["ttl"] = 3600
+        return _format_vector_results(vectors)
 
-    return context
+    except Exception as e:
+        logger.error(f"S3 Vectors 검색 에러: {e}")
+        return ""
 
 
-def _format_announcements_context(announcements):
-    """공고 리스트를 텍스트 컨텍스트로 포맷팅"""
-    if not announcements:
+def _extract_metadata_filter(question):
+    """질문에서 메타데이터 필터 추출 (키워드 검색)"""
+    filters = []
+    q = question.lower()
+
+    # 소스 필터
+    source_map = {
+        "nipa": "nipa", "니파": "nipa",
+        "kstartup": "kstartup", "k-startup": "kstartup", "케이스타트업": "kstartup",
+        "기업마당": "bizinfo", "bizinfo": "bizinfo",
+    }
+    for keyword, source in source_map.items():
+        if keyword in q:
+            filters.append({"source": source})
+            break
+
+    # D-day 필터 (마감임박)
+    if any(kw in q for kw in ["마감", "임박", "긴급", "d-day"]):
+        filters.append({"d_day": {"$gte": 0, "$lte": 7}})
+
+    if not filters:
+        return None
+    if len(filters) == 1:
+        return filters[0]
+    return {"$and": filters}
+
+
+def _format_vector_results(vectors):
+    """벡터 검색 결과를 텍스트 컨텍스트로 포맷팅"""
+    if not vectors:
         return ""
 
     lines = []
-    for i, ann in enumerate(announcements, 1):
-        parts = [f"[{i}] {ann.get('title', '제목 없음')}"]
-        if ann.get("source"):
-            parts.append(f"  출처: {ann['source']}")
-        if ann.get("category"):
-            parts.append(f"  분야: {ann['category']}")
-        if ann.get("d_day") is not None:
-            parts.append(f"  D-day: D-{ann['d_day']}")
-        if ann.get("organization"):
-            parts.append(f"  주관기관: {ann['organization']}")
-        if ann.get("department"):
-            parts.append(f"  소관부처: {ann['department']}")
-        if ann.get("summary"):
-            parts.append(f"  요약: {ann['summary']}")
-        if ann.get("url"):
-            parts.append(f"  URL: {ann['url']}")
-        if ann.get("relevance_score") is not None:
-            parts.append(f"  관련성 점수: {ann['relevance_score']}")
+    for i, v in enumerate(vectors, 1):
+        meta = v.get("metadata", {})
+        distance = v.get("distance")
+        parts = [f"[{i}] {meta.get('title', '제목 없음')}"]
+        if meta.get("source"):
+            parts.append(f"  출처: {meta['source']}")
+        if meta.get("category"):
+            parts.append(f"  분야: {meta['category']}")
+        d_day = meta.get("d_day")
+        if d_day is not None and d_day >= 0:
+            parts.append(f"  D-day: D-{d_day}")
+        if meta.get("organization"):
+            parts.append(f"  주관기관: {meta['organization']}")
+        if meta.get("department"):
+            parts.append(f"  소관부처: {meta['department']}")
+        if meta.get("summary"):
+            parts.append(f"  요약: {meta['summary']}")
+        if meta.get("url"):
+            parts.append(f"  URL: {meta['url']}")
+        if meta.get("relevance_score") is not None:
+            parts.append(f"  관련성 점수: {meta['relevance_score']}")
+        if distance is not None:
+            parts.append(f"  유사도: {1 - distance:.3f}")
         lines.append("\n".join(parts))
 
     return "\n\n".join(lines)
@@ -146,16 +188,19 @@ def _build_gov_funding_prompt(question, context):
             "위 안내와 함께 질문에 최대한 답변해 주세요."
         )
 
+    count = context.count("\n[")
+    if context.startswith("["):
+        count += 1
     return (
         "당신은 정부 지원사업 전문 어시스턴트입니다. "
-        "아래 공고 데이터를 기반으로 사용자의 질문에 답변하세요.\n\n"
+        "아래는 사용자 질문과 가장 관련성 높은 공고 데이터입니다 (벡터 유사도 검색 결과).\n\n"
         "규칙:\n"
         "- 데이터에 있는 정보만 기반으로 답변하세요\n"
         "- 관련 공고의 URL을 반드시 포함하세요\n"
         "- 마감 임박(D-7 이내) 공고는 강조해서 알려주세요\n"
-        "- 관련성 점수가 높은 공고를 우선 추천하세요\n"
+        "- 유사도가 높은 공고를 우선 추천하세요\n"
         "- Slack 메시지로 출력되므로 Slack mrkdwn 형식을 사용하세요\n\n"
-        f"=== 현재 정부 지원사업 공고 데이터 ({len(context.split('['))-1}건) ===\n\n"
+        f"=== 검색된 정부 지원사업 공고 ({count}건) ===\n\n"
         f"{context}\n\n"
         f"=== 사용자 질문 ===\n{question}"
     )
@@ -183,11 +228,13 @@ def call_claude(prompt, session_id, is_new_session):
     try:
         # 새 세션이면 --session-id, 기존 세션이면 --resume 사용
         if is_new_session and session_id not in active_sessions:
-            cmd = [CLAUDE_PATH, "-p", "--model", "opus",
+            cmd = [CLAUDE_PATH, "-p", "--model", "global.anthropic.claude-opus-4-6-v1",
+                   "--max-turns", "1",
                    "--session-id", session_id,
                    "--output-format", "text", prompt]
         else:
-            cmd = [CLAUDE_PATH, "-p", "--model", "opus",
+            cmd = [CLAUDE_PATH, "-p", "--model", "global.anthropic.claude-opus-4-6-v1",
+                   "--max-turns", "1",
                    "--resume", session_id,
                    "--output-format", "text", prompt]
 
@@ -196,7 +243,7 @@ def call_claude(prompt, session_id, is_new_session):
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,
             cwd=WORKING_DIR
         )
 
@@ -209,7 +256,7 @@ def call_claude(prompt, session_id, is_new_session):
             return f"에러: {result.stdout or result.stderr}"
     except subprocess.TimeoutExpired:
         logger.error(f"Claude 타임아웃 - session: {session_id}")
-        return "에러: Claude 응답 시간이 초과되었습니다 (2분)"
+        return "에러: Claude 응답 시간이 초과되었습니다 (5분)"
     except Exception as e:
         logger.error(f"Claude 예외 - session: {session_id}, error: {e}")
         return f"에러: {str(e)}"
@@ -251,14 +298,14 @@ def handle_mention(event, say):
     clean_text = re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
 
     if not clean_text:
-        say(f"<@{user}> 무엇을 도와드릴까요?")
+        say(f"<@{user}> 무엇을 도와드릴까요?", thread_ts=thread_ts)
         return
 
     # 처리 중 메시지 표시
-    say(f"<@{user}> 처리 중...")
-    # Gov-Funding 채널이면 S3 스냅샷 컨텍스트 주입
+    say(f"<@{user}> 처리 중...", thread_ts=thread_ts)
+    # Gov-Funding 채널이면 S3 Vectors 벡터 검색으로 관련 공고 컨텍스트 주입
     if GOV_FUNDING_CHANNEL_ID and channel == GOV_FUNDING_CHANNEL_ID:
-        context = get_gov_funding_context()
+        context = get_gov_funding_context(clean_text)
         prompt = _build_gov_funding_prompt(clean_text, context)
     else:
         prompt = clean_text
@@ -266,7 +313,7 @@ def handle_mention(event, say):
     # 스레드별 세션으로 Claude CLI 호출
     session_id, is_new = get_thread_session(channel, thread_ts)
     response = call_claude(prompt, session_id, is_new)
-    say(f"<@{user}> {response}")
+    say(f"<@{user}> {response}", thread_ts=thread_ts)
 
 
 def main():

@@ -50,7 +50,17 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(gh auth:*)"
+      "Bash(gh auth:*)",
+      "Bash(claude model list:*)",
+      "Bash(claude --version:*)",
+      "Bash(claude:*)",
+      "Bash(sort:*)",
+      "Bash(AWS_DEFAULT_REGION=ap-northeast-2 aws s3 ls:*)",
+      "Bash(aws s3 cp:*)",
+      "WebFetch(domain:boto3.amazonaws.com)",
+      "Bash(uv pip show:*)",
+      "Bash(/home/ubuntu/venvs/slack-app/bin/python3:*)",
+      "Bash(/home/ubuntu/venvs/gov-funding/bin/python3:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

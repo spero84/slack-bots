@@ -70,7 +70,7 @@ async def test_bedrock_analysis():
     print("=" * 60)
 
     analyzer = BedrockAnalyzer(
-        model_id="global.anthropic.claude-opus-4-6-v1:0",
+        model_id="global.anthropic.claude-opus-4-6-v1",
         region="us-west-2",
     )
 
