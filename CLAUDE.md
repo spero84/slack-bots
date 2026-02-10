@@ -159,7 +159,8 @@ sudo systemctl restart gov-funding
 | `SLACK_APP_TOKEN` | App Token (xapp-...) |
 | `AWS_REGION` | ap-northeast-2 |
 | `S3_BUCKET` | S3 버킷 이름 |
-| `SLACK_CHANNEL_ID` | Slack 채널 ID |
+| `SLACK_CHANNEL_ID` | Slack 채널 ID (Gov-Funding 알림용) |
+| `GOV_FUNDING_CHANNEL_ID` | Gov-Funding Q&A 채널 ID |
 
 ## Key Files
 
@@ -184,6 +185,12 @@ sudo systemctl restart gov-funding
 
 ### Add Slack command
 - `src/slack_app/app.py`에서 `@app.command()` 또는 `@app.message()` 데코레이터 사용
+
+### Gov-Funding 채널 Q&A
+- `GOV_FUNDING_CHANNEL_ID` 채널에서 봇 멘션 시 S3 스냅샷 기반 공고 Q&A 제공
+- 핵심 함수: `get_gov_funding_context()` (S3 fetch + 1시간 캐시), `_build_gov_funding_prompt()` (프롬프트 구성)
+- S3 경로: `snapshots/{kstartup,bizinfo,nipa}/` 에서 최신 스냅샷 로드
+- 다른 채널에서는 기존 일반 응답 유지
 
 ## Troubleshooting
 

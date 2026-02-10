@@ -34,7 +34,20 @@
       "Bash(.venv/bin/python:*)",
       "Bash(uv pip install:*)",
       "Bash(src/gov_funding/.venv/bin/python:*)",
-      "WebFetch(domain:docs.anthropic.com)"
+      "WebFetch(domain:docs.anthropic.com)",
+      "mcp__slack__slack_list_channels",
+      "mcp__notion__API-post-search",
+      "mcp__gmail__gmail_list_labels",
+      "mcp__calendar__calendar_list_events",
+      "Bash(timedatectl:*)",
+      "Bash(journalctl:*)",
+      "Bash(/home/ubuntu/.local/bin/claude:*)",
+      "Bash(sudo systemctl restart:*)",
+      "Bash(python3:*)",
+      "Bash(systemctl status:*)",
+      "Bash(aws s3api list-buckets:*)",
+      "Bash(/home/ubuntu/venvs/slack-app/bin/pip install:*)",
+      "Bash(git add:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

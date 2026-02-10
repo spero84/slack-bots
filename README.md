@@ -6,7 +6,7 @@ Searchdoc Slack 봇 통합 프로젝트 - Gov Funding Monitor, Scheduler, Slack 
 
 | 서비스 | 컨테이너 | 스케줄 | 설명 |
 |--------|----------|--------|------|
-| Slack App | `slack-app` | 상시 실행 (Socket Mode) | Claude CLI 기반 Slack 봇 |
+| Slack App | `slack-app` | 상시 실행 (Socket Mode) | Claude CLI 기반 Slack 봇 (Gov-Funding Q&A 포함) |
 | Scheduler | `scheduler` | 평일 9,11,13,15,17시 KST | Claude CLI 기반 업무 자동화 |
 | Gov-Funding | `gov-funding` | 매일 09:00 KST | 정부 지원사업 공고 모니터링 |
 
@@ -296,8 +296,9 @@ slack-bots/
 
 | 변수 | 설명 | 기본값 |
 |------|------|--------|
-| `S3_BUCKET` | 스냅샷 저장 버킷 | slack-bots-prod-snapshots |
+| `S3_BUCKET` | 스냅샷 저장 버킷 | gov-funding-monitor-snapshots |
 | `SLACK_CHANNEL_ID` | 알림 채널 ID | - |
+| `GOV_FUNDING_CHANNEL_ID` | Gov-Funding Q&A 채널 ID | - |
 | `RELEVANCE_THRESHOLD` | AI 필터링 임계값 | 0.7 |
 | `DEADLINE_ALERT_DAYS` | 마감 임박 기준일 | 7 |
 
@@ -364,6 +365,36 @@ docker exec -it slack-app /bin/bash
 ### 모니터링
 - **CloudWatch Logs**: 컨테이너 로그 수집
 - **VPC Flow Logs**: 네트워크 트래픽 모니터링
+
+---
+
+## Gov-Funding 채널 Q&A
+
+Slack App은 Gov-Funding 채널(`GOV_FUNDING_CHANNEL_ID`)에서 봇을 멘션하면 S3에 저장된 최신 공고 스냅샷을 컨텍스트로 주입하여 공고 기반 답변을 제공합니다.
+
+### 동작 방식
+
+```
+사용자 @봇 멘션 → 채널 ID 확인 → S3 스냅샷 fetch (1시간 캐시) → 공고 컨텍스트 + 질문 → Claude CLI → 스레드 응답
+```
+
+- **대상 채널**: `GOV_FUNDING_CHANNEL_ID` 환경변수로 지정된 채널에서만 동작
+- **데이터 소스**: S3 버킷의 `snapshots/{kstartup,bizinfo,nipa}/` 경로에서 최신 스냅샷 로드
+- **캐시**: 1시간 TTL (데이터 없으면 5분 TTL)
+- **다른 채널**: 기존 일반 Claude CLI 응답 유지
+
+### 전제조건
+
+1. `GOV_FUNDING_CHANNEL_ID` 및 `S3_BUCKET` 환경변수 설정
+2. Gov-Funding 서비스가 최소 1회 실행되어 S3에 스냅샷이 존재해야 함
+
+### 사용 예시
+
+```
+@bot 마감 임박한 공고 알려줘
+@bot AI 관련 지원사업 있어?
+@bot 중소기업 대상 R&D 지원사업 요약해줘
+```
 
 ---
 

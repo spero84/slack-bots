@@ -66,6 +66,12 @@ MCP gmail 도구(mcp__gmail__*)를 직접 호출하여:
 ## 3단계: 메일 초안 작성 (절대 전송 금지)
 MCP gmail 도구(mcp__gmail__gmail_create_draft, mcp__gmail__gmail_create_reply_draft)를 직접 호출하여:
 - 응답이 필요한 메일 식별
+- **본인 이메일: shawn.kim@searchdoc.ai**
+- **다음 메일은 초안 작성 대상에서 제외:**
+  - 내가 보낸 메일 (from이 @searchdoc.ai 도메인인 경우)
+  - 내가 직접 받은 메일이 아닌 경우 (To에 shawn.kim@searchdoc.ai가 없는 메일)
+  - 참조(CC/BCC)에만 포함된 메일
+- **초안 작성 대상:** To에 shawn.kim@searchdoc.ai가 직접 포함된 외부 발신 메일만 해당
 - 각 메일에 대해 초안만 작성 (Gmail Drafts에 저장)
 - 초안 목록 생성
 - **중요: 메일을 절대 전송하지 마세요. 초안 생성만 허용됩니다.**
@@ -145,7 +151,7 @@ def run_workflow():
 
     # 이전 세션이 있으면 --resume, 없으면 새 세션
     saved_sid = get_saved_session_id()
-    cmd = [CLAUDE_PATH, "-p", WORKFLOW_PROMPT]
+    cmd = [CLAUDE_PATH, "-p", "--model", "opus", WORKFLOW_PROMPT]
     if saved_sid:
         cmd += ["--resume", saved_sid]
         logger.info(f"이전 세션 이어서 실행: {saved_sid}")
@@ -217,7 +223,7 @@ def main():
     # 평일 9시부터 2시간 간격 실행 (9, 11, 13, 15, 17시)
     scheduler.add_job(
         run_workflow,
-        CronTrigger(day_of_week='mon-fri', hour='9,11,13,15,17', minute=0),
+        CronTrigger(day_of_week='mon-fri', hour='9,11,13,15,17', minute=0, timezone='Asia/Seoul'),
         id='hourly_workflow',
         name='Bi-hourly Task Workflow'
     )

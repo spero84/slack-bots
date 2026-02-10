@@ -153,6 +153,11 @@ async def run_workflow() -> dict:
         combined_payload.new_announcements.extend(payload.new_announcements)
         combined_payload.deadline_soon.extend(payload.deadline_soon)
 
+    # 정확도순 정렬 (높은 점수가 먼저)
+    combined_payload.new_announcements.sort(
+        key=lambda a: a.relevance_score or 0, reverse=True
+    )
+
     result["new_announcements"] = len(combined_payload.new_announcements)
     result["deadline_soon"] = len(combined_payload.deadline_soon)
 
@@ -194,7 +199,7 @@ def main():
     # 매일 9시 실행
     scheduler.add_job(
         execute_workflow,
-        CronTrigger(hour=9, minute=0),
+        CronTrigger(hour=9, minute=0, timezone='Asia/Seoul'),
         id='gov_funding_monitor',
         name='Government Funding Monitor'
     )

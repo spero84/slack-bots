@@ -71,6 +71,13 @@ apt-get update || true  # command-not-found 에러 무시
 apt-get upgrade -y
 
 # ============================================
+# 1.5. 타임존 설정 (KST)
+# ============================================
+echo "[1.5/7] 타임존 설정 (Asia/Seoul)..."
+timedatectl set-timezone Asia/Seoul
+echo "타임존 설정 완료: $(timedatectl show --property=Timezone --value)"
+
+# ============================================
 # 2. 기본 패키지 설치
 # ============================================
 echo "[2/7] 기본 패키지 설치..."
