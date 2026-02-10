@@ -29,7 +29,7 @@ class Config:
     # Bedrock (us-west-2 리전 사용)
     bedrock_region: str = field(default_factory=lambda: os.environ.get("BEDROCK_REGION", "us-west-2"))
     bedrock_model_id: str = field(default_factory=lambda: os.environ.get(
-        "BEDROCK_MODEL_ID", "us.anthropic.claude-opus-4-5-20251101-v1:0"
+        "BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-6-v1:0"
     ))
 
 

@@ -47,7 +47,10 @@
       "Bash(systemctl status:*)",
       "Bash(aws s3api list-buckets:*)",
       "Bash(/home/ubuntu/venvs/slack-app/bin/pip install:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(gh auth:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
