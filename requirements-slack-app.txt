@@ -1,0 +1,4 @@
+# Slack App Dependencies
+slack-bolt>=1.18.0
+slack-sdk>=3.26.0
+python-dotenv>=1.0.0

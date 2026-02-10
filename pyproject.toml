@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gov-funding-monitor"
+version = "1.0.0"
+description = "Government funding announcement monitoring bot"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0.0",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "playwright>=1.40.0",
+    "boto3>=1.34.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth-httplib2>=0.1.1",
+    "google-auth-oauthlib>=1.1.0",
+    "python-dateutil>=2.8.2",
+    "pytz>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "moto>=5.0.0",
+    "black",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "N", "W"]

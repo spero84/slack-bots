@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(terraform destroy:*)",
+      "Bash(terraform -chdir=terraform destroy)",
+      "Bash(terraform -chdir=terraform destroy -auto-approve)",
+      "Bash(aws s3 rb:*)",
+      "Bash(aws sts:*)",
+      "Bash(terraform init:*)",
+      "Bash(terraform plan:*)",
+      "Bash(terraform apply:*)",
+      "Bash(aws ec2 describe-key-pairs:*)",
+      "Bash(ls:*)",
+      "Bash(terraform state list:*)",
+      "Bash(chmod:*)",
+      "Bash(docker build:*)",
+      "Bash(uv run python:*)",
+      "Bash(docker run:*)",
+      "Bash(aws ec2 describe-instances:*)",
+      "Bash(aws ec2 describe-network-interfaces:*)",
+      "Bash(aws ec2 describe-security-groups:*)",
+      "Bash(terraform refresh:*)",
+      "Bash(terraform state rm:*)",
+      "Bash(./scripts/deploy-to-s3.sh:*)",
+      "Bash(aws s3 mb:*)",
+      "Bash(aws s3 ls:*)",
+      "Bash(aws iam list-attached-role-policies:*)",
+      "Bash(bash -n:*)",
+      "Bash(terraform validate:*)",
+      "WebFetch(domain:www.nipa.kr)",
+      "Bash(python -m py_compile:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(uv pip install:*)",
+      "Bash(src/gov_funding/.venv/bin/python:*)",
+      "WebFetch(domain:docs.anthropic.com)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "github",
+    "gmail",
+    "calendar",
+    "notion"
+  ]
+}
