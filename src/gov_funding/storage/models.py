@@ -11,6 +11,8 @@ class Source(str, Enum):
     KSTARTUP = "kstartup"
     BIZINFO = "bizinfo"
     NIPA = "nipa"
+    NIA = "nia"
+    IITP = "iitp"
 
 
 class ChangeType(str, Enum):

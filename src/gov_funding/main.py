@@ -13,7 +13,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from .analyzers import filter_with_bedrock, keyword_filter
-from .crawlers import BizinfoCrawler, NipaCrawler
+from .crawlers import BizinfoCrawler, NipaCrawler, NiaCrawler
 from .notifiers import send_gmail_notification, send_slack_notification
 from .storage import NotificationPayload, Source, deduplicate_announcements
 from .storage.vector_storage import S3VectorStorage
@@ -22,10 +22,17 @@ from .utils import get_config, logger
 # Playwright is optional
 try:
     from .crawlers import KStartupCrawler
-    PLAYWRIGHT_AVAILABLE = True
+    KSTARTUP_AVAILABLE = True
 except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
+    KSTARTUP_AVAILABLE = False
     logger.warning("Playwright not available - K-Startup crawling disabled")
+
+try:
+    from .crawlers import IitpCrawler
+    IITP_AVAILABLE = True
+except ImportError:
+    IITP_AVAILABLE = False
+    logger.warning("Playwright not available - IITP crawling disabled")
 
 # 스케줄러 로깅
 logging.basicConfig(
@@ -38,7 +45,7 @@ scheduler_logger = logging.getLogger(__name__)
 async def run_workflow(force_resend: bool = False) -> dict:
     """메인 워크플로우 실행
 
-    1. K-Startup, 기업마당, NIPA에서 공고 크롤링
+    1. K-Startup, 기업마당, NIPA, NIA, IITP에서 공고 크롤링
     2. 중복 제거 및 병합
     3. 키워드 + Bedrock 필터링
     4. S3 Vectors 비교로 신규/마감임박 식별
@@ -54,7 +61,7 @@ async def run_workflow(force_resend: bool = False) -> dict:
 
     result = {
         "timestamp": datetime.now().isoformat(),
-        "crawled": {"kstartup": 0, "bizinfo": 0, "nipa": 0},
+        "crawled": {"kstartup": 0, "bizinfo": 0, "nipa": 0, "nia": 0, "iitp": 0},
         "filtered": 0,
         "new_announcements": 0,
         "deadline_soon": 0,
@@ -66,10 +73,14 @@ async def run_workflow(force_resend: bool = False) -> dict:
     kstartup_announcements = []
     bizinfo_announcements = []
     nipa_announcements = []
+    nia_announcements = []
+    iitp_announcements = []
 
     bizinfo_crawler = BizinfoCrawler()
     nipa_crawler = NipaCrawler()
-    kstartup_crawler = KStartupCrawler() if PLAYWRIGHT_AVAILABLE else None
+    nia_crawler = NiaCrawler()
+    kstartup_crawler = KStartupCrawler() if KSTARTUP_AVAILABLE else None
+    iitp_crawler = IitpCrawler() if IITP_AVAILABLE else None
 
     try:
         # Bizinfo 크롤링 (항상 실행)
@@ -80,6 +91,10 @@ async def run_workflow(force_resend: bool = False) -> dict:
         nipa_announcements = await nipa_crawler.crawl(max_items=50)
         result["crawled"]["nipa"] = len(nipa_announcements)
 
+        # NIA 크롤링 (항상 실행)
+        nia_announcements = await nia_crawler.crawl(max_items=50)
+        result["crawled"]["nia"] = len(nia_announcements)
+
         # K-Startup 크롤링 (Playwright 사용 가능한 경우만)
         if kstartup_crawler:
             kstartup_announcements = await kstartup_crawler.crawl(max_items=50)
@@ -87,10 +102,19 @@ async def run_workflow(force_resend: bool = False) -> dict:
         else:
             logger.info("K-Startup 크롤링 스킵 (Playwright 미설치)")
 
+        # IITP 크롤링 (Playwright 사용 가능한 경우만)
+        if iitp_crawler:
+            iitp_announcements = await iitp_crawler.crawl(max_items=50)
+            result["crawled"]["iitp"] = len(iitp_announcements)
+        else:
+            logger.info("IITP 크롤링 스킵 (Playwright 미설치)")
+
         logger.info(
             f"크롤링 완료 - K-Startup: {len(kstartup_announcements)}건, "
             f"Bizinfo: {len(bizinfo_announcements)}건, "
-            f"NIPA: {len(nipa_announcements)}건"
+            f"NIPA: {len(nipa_announcements)}건, "
+            f"NIA: {len(nia_announcements)}건, "
+            f"IITP: {len(iitp_announcements)}건"
         )
 
     except Exception as e:
@@ -99,18 +123,24 @@ async def run_workflow(force_resend: bool = False) -> dict:
     finally:
         await bizinfo_crawler.close()
         await nipa_crawler.close()
+        await nia_crawler.close()
         if kstartup_crawler:
             await kstartup_crawler.close()
+        if iitp_crawler:
+            await iitp_crawler.close()
 
-    if not kstartup_announcements and not bizinfo_announcements and not nipa_announcements:
+    if not any([kstartup_announcements, bizinfo_announcements, nipa_announcements,
+                nia_announcements, iitp_announcements]):
         logger.warning("크롤링 결과 없음")
         return result
 
-    # 2. 중복 제거 및 병합
+    # 2. 중복 제거 및 병합 (우선순위: K-Startup > Bizinfo > NIPA > NIA > IITP)
     all_announcements = deduplicate_announcements(
         kstartup_announcements,
         bizinfo_announcements,
         nipa_announcements,
+        nia_announcements,
+        iitp_announcements,
     )
 
     # 3. 키워드 필터링 (1차)

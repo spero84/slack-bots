@@ -139,44 +139,36 @@ class S3Storage:
 
 
 def deduplicate_announcements(
-    kstartup_announcements: list[Announcement],
-    bizinfo_announcements: list[Announcement],
-    nipa_announcements: list[Announcement],
+    *announcement_lists: list[Announcement],
 ) -> list[Announcement]:
-    """세 출처의 공고를 병합하고 중복 제거
+    """여러 출처의 공고를 병합하고 중복 제거
 
-    K-Startup, Bizinfo, NIPA에서 동일한 공고가 올라오는 경우가 있음.
+    인자 순서가 우선순위 (먼저 전달된 출처가 높은 우선순위).
     제목을 정규화하여 중복 체크.
-    우선순위: K-Startup > Bizinfo > NIPA
 
     Args:
-        kstartup_announcements: K-Startup 공고
-        bizinfo_announcements: 기업마당 공고
-        nipa_announcements: NIPA 공고
+        *announcement_lists: 우선순위 순서대로 전달된 공고 목록들
 
     Returns:
         중복 제거된 공고 목록
     """
-    result = list(kstartup_announcements)
-    seen_titles = {a.normalized_title for a in kstartup_announcements}
+    result = []
+    seen_titles = set()
 
-    for ann in bizinfo_announcements:
-        if ann.normalized_title not in seen_titles:
-            result.append(ann)
-            seen_titles.add(ann.normalized_title)
-        else:
-            logger.debug(f"중복 제거 (Bizinfo): {ann.title}")
+    for announcements in announcement_lists:
+        for ann in announcements:
+            if ann.normalized_title not in seen_titles:
+                result.append(ann)
+                seen_titles.add(ann.normalized_title)
+            else:
+                logger.debug(f"중복 제거 ({ann.source.value}): {ann.title}")
 
-    for ann in nipa_announcements:
-        if ann.normalized_title not in seen_titles:
-            result.append(ann)
-            seen_titles.add(ann.normalized_title)
-        else:
-            logger.debug(f"중복 제거 (NIPA): {ann.title}")
-
-    logger.info(
-        f"중복 제거 완료 - K-Startup: {len(kstartup_announcements)}건, "
-        f"Bizinfo: {len(bizinfo_announcements)}건, "
-        f"NIPA: {len(nipa_announcements)}건 → 총: {len(result)}건"
-    )
+    # 소스별 건수 로그
+    source_counts = []
+    for announcements in announcement_lists:
+        if announcements:
+            source_name = announcements[0].source.value
+            source_counts.append(f"{source_name}: {len(announcements)}건")
+    counts_str = ", ".join(source_counts) if source_counts else "없음"
+    logger.info(f"중복 제거 완료 - {counts_str} → 총: {len(result)}건")
     return result

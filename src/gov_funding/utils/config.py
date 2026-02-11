@@ -100,6 +100,29 @@ CRAWL_SOURCES = {
         "list_url": "https://www.nipa.kr/home/2-2",
         "detail_url_template": "https://www.nipa.kr/home/2-2/{id}",
     },
+    "nia": {
+        "name": "NIA",
+        "base_url": "https://www.nia.or.kr",
+        "boards": [
+            {
+                "name": "입찰공고",
+                "cbIdx": "78336",
+                "list_url": "https://www.nia.or.kr/site/nia_kor/ex/bbs/List.do?cbIdx=78336",
+            },
+            {
+                "name": "사업공고",
+                "cbIdx": "99835",
+                "list_url": "https://www.nia.or.kr/site/nia_kor/ex/bbs/List.do?cbIdx=99835",
+            },
+        ],
+        "detail_url_template": "https://www.nia.or.kr/site/nia_kor/ex/bbs/View.do?cbIdx={cbIdx}&bcIdx={bcIdx}&parentSeq={parentSeq}",
+    },
+    "iitp": {
+        "name": "IITP",
+        "base_url": "https://www.iitp.kr",
+        "list_url": "https://www.iitp.kr/web/lay1/program/S1T44C51/iris/list.do",
+        "detail_url_template": "https://www.iitp.kr/web/lay1/program/S1T44C51/iris/view.do?seq={id}",
+    },
 }
 
 
