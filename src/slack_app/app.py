@@ -51,6 +51,7 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL_ID", "amazon.titan-embed-text-
 
 # AI News Q&A 설정
 AI_NEWS_CHANNEL_ID = os.environ.get("AI_NEWS_CHANNEL_ID", "")
+AI_NEWS_S3_BUCKET = os.environ.get("AI_NEWS_S3_BUCKET", S3_VECTOR_BUCKET)
 
 # S3 Vectors / Bedrock 클라이언트 (lazy init)
 _s3v_client = None
@@ -185,7 +186,7 @@ def _format_vector_results(vectors):
 
 def get_ai_news_context(question):
     """사용자 질문으로 AI News S3 Vectors 검색 → 관련 기사 컨텍스트 반환"""
-    if not S3_VECTOR_BUCKET:
+    if not AI_NEWS_S3_BUCKET:
         return ""
 
     try:
@@ -201,7 +202,7 @@ def get_ai_news_context(question):
 
         s3v = _get_s3v_client()
         kwargs = {
-            "vectorBucketName": S3_VECTOR_BUCKET,
+            "vectorBucketName": AI_NEWS_S3_BUCKET,
             "indexName": "ainewsarticles",
             "queryVector": {"float32": embedding},
             "topK": 5,

@@ -9,6 +9,7 @@ import json
 import logging
 import sys
 from datetime import datetime
+from difflib import SequenceMatcher
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -46,8 +47,21 @@ logging.basicConfig(
 scheduler_logger = logging.getLogger(__name__)
 
 
+KOREAN_SOURCES = {"aitimes", "itworld", "etnews", "itdaily"}
+
+
+def _is_similar(title1: str, title2: str, threshold: float = 0.6) -> bool:
+    """두 정규화된 제목의 유사도가 임계값 이상인지 확인"""
+    return SequenceMatcher(None, title1, title2).ratio() >= threshold
+
+
 def deduplicate_articles(articles: list[Article]) -> list[Article]:
-    """제목 기반 중복 제거 (첫 번째 등장한 것 유지)"""
+    """제목 기반 중복 제거
+
+    1차: 정규화 제목 정확 일치 제거
+    2차: 한국 뉴스 소스 간 유사 제목 제거 (SequenceMatcher 0.6 이상)
+    """
+    # 1차: 정확 일치 중복 제거
     seen: set[str] = set()
     unique: list[Article] = []
     for article in articles:
@@ -55,6 +69,31 @@ def deduplicate_articles(articles: list[Article]) -> list[Article]:
         if key not in seen:
             seen.add(key)
             unique.append(article)
+
+    # 2차: 한국 소스 간 유사 제목 제거
+    remove_indices: set[int] = set()
+    korean_indices = [
+        i for i, a in enumerate(unique)
+        if a.source.value in KOREAN_SOURCES
+    ]
+
+    for idx_i, i in enumerate(korean_indices):
+        if i in remove_indices:
+            continue
+        for j in korean_indices[idx_i + 1:]:
+            if j in remove_indices:
+                continue
+            if _is_similar(unique[i].normalized_title, unique[j].normalized_title):
+                logger.info(
+                    f"유사 중복 제거: [{unique[j].source.value}] {unique[j].title[:40]}… "
+                    f"← [{unique[i].source.value}] {unique[i].title[:40]}…"
+                )
+                remove_indices.add(j)
+
+    if remove_indices:
+        unique = [a for idx, a in enumerate(unique) if idx not in remove_indices]
+        logger.info(f"한국 뉴스 유사 중복 제거: {len(remove_indices)}건")
+
     return unique
 
 

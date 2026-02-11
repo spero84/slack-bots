@@ -8,7 +8,7 @@ class Config:
     """애플리케이션 설정"""
 
     # AWS
-    s3_bucket: str = field(default_factory=lambda: os.environ.get("S3_BUCKET", "gov-funding-monitor"))
+    s3_bucket: str = field(default_factory=lambda: os.environ.get("AI_NEWS_S3_BUCKET", os.environ.get("S3_BUCKET", "gov-funding-monitor")))
     aws_region: str = field(default_factory=lambda: os.environ.get("AWS_REGION", "ap-northeast-2"))
 
     # Slack
