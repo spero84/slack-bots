@@ -89,6 +89,16 @@ output "ec2_ssh_command" {
 }
 
 # S3 Vectors Outputs
+output "gov_funding_snapshots_vector_bucket" {
+  description = "Gov Funding Monitor S3 Vectors bucket name"
+  value       = aws_s3vectors_vector_bucket.gov_funding_snapshots.vector_bucket_name
+}
+
+output "gov_funding_snapshots_vector_bucket_arn" {
+  description = "Gov Funding Monitor S3 Vectors bucket ARN"
+  value       = aws_s3vectors_vector_bucket.gov_funding_snapshots.vector_bucket_arn
+}
+
 output "s3vectors_ai_news_arn" {
   description = "ARN of the AI News S3 Vectors bucket"
   value       = module.s3vectors_ai_news.vector_bucket_arn

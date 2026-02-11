@@ -3,7 +3,7 @@
 # EC2 초기 설정 스크립트 (Ubuntu 22.04/24.04)
 # SSH 또는 SSM Session Manager로 접속 후 실행
 #
-# Docker 대신 systemd 서비스로 앱 실행
+# systemd 서비스로 앱 실행
 # - 모든 앱에서 Claude Code 사용 가능
 # - 환경변수는 .env 파일에서 직접 로드
 #

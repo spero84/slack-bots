@@ -28,6 +28,11 @@ module "ec2_slack_bot" {
   root_volume_size        = var.ec2_root_volume_size
 }
 
+# S3 Vectors Bucket for Gov Funding Monitor
+resource "aws_s3vectors_vector_bucket" "gov_funding_snapshots" {
+  vector_bucket_name = "gov-funding-monitor-snapshots"
+}
+
 # S3 Vectors Module for AI News
 module "s3vectors_ai_news" {
   source = "./modules/s3vectors"
