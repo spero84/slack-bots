@@ -35,7 +35,7 @@ logging.basicConfig(
 scheduler_logger = logging.getLogger(__name__)
 
 
-async def run_workflow() -> dict:
+async def run_workflow(force_resend: bool = False) -> dict:
     """메인 워크플로우 실행
 
     1. K-Startup, 기업마당, NIPA에서 공고 크롤링
@@ -132,39 +132,44 @@ async def run_workflow() -> dict:
     combined_payload = NotificationPayload()
 
     try:
-        existing_keys = vector_storage.get_existing_keys()
-        logger.info(f"기존 벡터 수: {len(existing_keys)}건")
+        if force_resend:
+            # 재시작 시 강제 재전송: 모든 필터링된 공고를 신규로 취급
+            logger.info("강제 재전송 모드: 모든 공고를 신규로 취급")
+            combined_payload.new_announcements = list(final_filtered)
+        else:
+            existing_keys = vector_storage.get_existing_keys()
+            logger.info(f"기존 벡터 수: {len(existing_keys)}건")
 
-        # 신규 공고 식별
-        for ann in final_filtered:
-            key = f"{ann.source.value}_{ann.id}"
-            if key not in existing_keys:
-                combined_payload.new_announcements.append(ann)
-
-        # 마감임박 식별 (마일스톤 기반: D-7, D-3 시점 알림)
-        DEADLINE_MILESTONES = [7, 3]
-        existing_filtered_keys = [
-            f"{a.source.value}_{a.id}"
-            for a in final_filtered
-            if f"{a.source.value}_{a.id}" in existing_keys
-        ]
-        if existing_filtered_keys:
-            prev_metadata = vector_storage.get_vectors_metadata(existing_filtered_keys)
+            # 신규 공고 식별
             for ann in final_filtered:
                 key = f"{ann.source.value}_{ann.id}"
-                if key not in prev_metadata:
-                    continue
-                if ann.d_day is None or ann.d_day <= 0:
-                    continue
+                if key not in existing_keys:
+                    combined_payload.new_announcements.append(ann)
 
-                prev_d_day = prev_metadata[key].get("d_day", -1)
+            # 마감임박 식별 (마일스톤 기반: D-7, D-3 시점 알림)
+            DEADLINE_MILESTONES = [7, 3]
+            existing_filtered_keys = [
+                f"{a.source.value}_{a.id}"
+                for a in final_filtered
+                if f"{a.source.value}_{a.id}" in existing_keys
+            ]
+            if existing_filtered_keys:
+                prev_metadata = vector_storage.get_vectors_metadata(existing_filtered_keys)
+                for ann in final_filtered:
+                    key = f"{ann.source.value}_{ann.id}"
+                    if key not in prev_metadata:
+                        continue
+                    if ann.d_day is None or ann.d_day <= 0:
+                        continue
 
-                # 마일스톤 전환 감지: prev_d_day > milestone >= current d_day
-                for milestone in DEADLINE_MILESTONES:
-                    if ann.d_day <= milestone and (prev_d_day == -1 or prev_d_day > milestone):
-                        combined_payload.deadline_soon.append(ann)
-                        logger.info(f"마감 리마인더: {ann.title} (D-{ann.d_day}, 마일스톤: D-{milestone})")
-                        break
+                    prev_d_day = prev_metadata[key].get("d_day", -1)
+
+                    # 마일스톤 전환 감지: prev_d_day > milestone >= current d_day
+                    for milestone in DEADLINE_MILESTONES:
+                        if ann.d_day <= milestone and (prev_d_day == -1 or prev_d_day > milestone):
+                            combined_payload.deadline_soon.append(ann)
+                            logger.info(f"마감 리마인더: {ann.title} (D-{ann.d_day}, 마일스톤: D-{milestone})")
+                            break
 
         # 벡터 저장 (전체 upsert - 신규+기존 모두 업데이트)
         vector_storage.upsert_announcements(final_filtered)
@@ -176,9 +181,12 @@ async def run_workflow() -> dict:
         if not combined_payload.new_announcements:
             combined_payload.new_announcements = list(final_filtered)
 
-    # 정확도순 정렬 (높은 점수가 먼저)
+    # 마감일순 정렬 (가까운 마감일 먼저, 마감일 없는 공고는 맨 뒤)
     combined_payload.new_announcements.sort(
-        key=lambda a: a.relevance_score or 0, reverse=True
+        key=lambda a: a.d_day if a.d_day is not None else float('inf')
+    )
+    combined_payload.deadline_soon.sort(
+        key=lambda a: a.d_day if a.d_day is not None else float('inf')
     )
 
     result["new_announcements"] = len(combined_payload.new_announcements)
@@ -205,11 +213,13 @@ async def run_workflow() -> dict:
     return result
 
 
-def execute_workflow():
+def execute_workflow(force_resend: bool = False):
     """동기 래퍼 - APScheduler에서 호출"""
     scheduler_logger.info("정부 지원사업 모니터링 시작...")
+    if force_resend:
+        scheduler_logger.info("강제 재전송 모드 활성화")
     try:
-        result = asyncio.run(run_workflow())
+        result = asyncio.run(run_workflow(force_resend=force_resend))
         scheduler_logger.info(f"완료: {json.dumps(result, ensure_ascii=False)}")
     except Exception as e:
         scheduler_logger.error(f"워크플로우 오류: {e}")
@@ -228,8 +238,8 @@ def main():
     )
 
     scheduler_logger.info("스케줄러 시작: 매일 9시 정부 지원사업 모니터링")
-    scheduler_logger.info("즉시 1회 테스트 실행...")
-    execute_workflow()
+    scheduler_logger.info("즉시 1회 실행 (강제 재전송)...")
+    execute_workflow(force_resend=True)
 
     scheduler.start()
 
