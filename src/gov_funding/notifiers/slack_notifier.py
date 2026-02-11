@@ -10,6 +10,14 @@ from ..utils import get_config, logger
 
 PAGE_SIZE = 10
 
+SOURCE_DISPLAY_NAMES = {
+    "kstartup": "K-Startup",
+    "bizinfo": "기업마당",
+    "nipa": "NIPA",
+    "nia": "NIA",
+    "iitp": "IITP",
+}
+
 
 class SlackNotifier:
     """Slack Bot Token 기반 알림 전송"""
@@ -184,7 +192,7 @@ class SlackNotifier:
             "type": "context",
             "elements": [{
                 "type": "mrkdwn",
-                "text": "🤖 Gov Funding Monitor | K-Startup, 기업마당에서 수집",
+                "text": "🤖 Gov Funding Monitor | K-Startup, 기업마당, NIPA, NIA, IITP에서 수집",
             }],
         })
 
@@ -207,7 +215,7 @@ class SlackNotifier:
             "type": "context",
             "elements": [{
                 "type": "mrkdwn",
-                "text": "🤖 Gov Funding Monitor | K-Startup, 기업마당에서 수집",
+                "text": "🤖 Gov Funding Monitor | K-Startup, 기업마당, NIPA, NIA, IITP에서 수집",
             }],
         })
         return blocks
@@ -223,6 +231,8 @@ class SlackNotifier:
 
         # 메타 정보
         meta_parts = []
+        source_name = SOURCE_DISPLAY_NAMES.get(ann.source.value, ann.source.value)
+        meta_parts.append(f"출처: {source_name}")
         if ann.category:
             meta_parts.append(f"분야: {ann.category}")
         if ann.d_day is not None:
