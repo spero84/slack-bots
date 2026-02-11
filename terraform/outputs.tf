@@ -87,3 +87,14 @@ output "ec2_ssh_command" {
   description = "SSH command to connect"
   value       = module.ec2_slack_bot.ssh_command
 }
+
+# S3 Vectors Outputs
+output "gov_funding_snapshots_vector_bucket" {
+  description = "Gov Funding Monitor S3 Vectors bucket name"
+  value       = aws_s3vectors_vector_bucket.gov_funding_snapshots.vector_bucket_name
+}
+
+output "gov_funding_snapshots_vector_bucket_arn" {
+  description = "Gov Funding Monitor S3 Vectors bucket ARN"
+  value       = aws_s3vectors_vector_bucket.gov_funding_snapshots.vector_bucket_arn
+}

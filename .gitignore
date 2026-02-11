@@ -40,6 +40,7 @@ terraform/*.tfstate
 terraform/*.tfstate.*
 terraform/.terraform.lock.hcl
 terraform/terraform.tfvars
+terraform/tfplan
 
 # Lambda
 terraform/lambda.zip
@@ -67,5 +68,8 @@ scripts/test_full_workflow.py
 .DS_Store
 Thumbs.db
 
-
+# Node
 node_modules/
+
+# Claude Code local settings
+.claude/settings.local.json

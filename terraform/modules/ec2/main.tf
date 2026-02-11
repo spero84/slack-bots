@@ -121,6 +121,12 @@ resource "aws_iam_role_policy_attachment" "s3" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
 }
 
+# Attach PowerUserAccess policy
+resource "aws_iam_role_policy_attachment" "power_user" {
+  role       = aws_iam_role.slack_bot.name
+  policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
+}
+
 # EC2 Instance
 resource "aws_instance" "slack_bot" {
   ami                         = data.aws_ami.ubuntu.id
