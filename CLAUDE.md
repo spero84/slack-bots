@@ -2,13 +2,14 @@
 
 ## Project Overview
 
-Searchdoc Slack 봇 통합 프로젝트. 3개의 systemd 서비스로 구성되어 AWS EC2에서 실행됩니다.
+Searchdoc Slack 봇 통합 프로젝트. 4개의 systemd 서비스로 구성되어 AWS EC2에서 실행됩니다.
 
 | 서비스 | systemd unit | 설명 |
 |--------|--------------|------|
 | Slack App | `slack-app.service` | Socket Mode Slack 봇 (상시 실행) |
 | Scheduler | `scheduler.service` | 업무 자동화 (평일 9,11,13,15,17시) |
 | Gov-Funding | `gov-funding.service` | 정부 지원사업 모니터링 (매일 9시) |
+| AI News | `ai-news.service` | AI/LLM 뉴스·논문 모니터링 (매일 8시) |
 
 ## Project Structure
 
@@ -17,23 +18,31 @@ slack-bots/
 ├── src/
 │   ├── slack_app/app.py           # Slack Bot (Socket Mode)
 │   ├── scheduler/scheduler.py     # APScheduler 기반 업무 자동화
-│   └── gov_funding/
-│       ├── main.py                # APScheduler 메인 엔트리
-│       ├── crawlers/              # K-Startup, Bizinfo 크롤러
-│       ├── analyzers/             # Bedrock AI 필터링
-│       ├── notifiers/             # Slack, Gmail 알림
-│       └── storage/               # S3 스냅샷
+│   ├── gov_funding/
+│   │   ├── main.py                # APScheduler 메인 엔트리
+│   │   ├── crawlers/              # K-Startup, Bizinfo 크롤러
+│   │   ├── analyzers/             # Bedrock AI 필터링
+│   │   ├── notifiers/             # Slack, Gmail 알림
+│   │   └── storage/               # S3 스냅샷
+│   └── ai_news/
+│       ├── main.py                # APScheduler 메인 엔트리 (매일 8시)
+│       ├── crawlers/              # arXiv, HN, TechCrunch, Anthropic, OpenAI, DeepMind, HF
+│       ├── analyzers/             # Bedrock 요약·중요도 평가
+│       ├── notifiers/             # Slack 알림
+│       └── storage/               # S3 Vectors 중복 제거
 ├── docker/                        # (로컬 개발용)
 │   ├── slack-app/Dockerfile
 │   ├── scheduler/Dockerfile
-│   └── gov-funding/Dockerfile
+│   ├── gov-funding/Dockerfile
+│   └── ai-news/Dockerfile
 ├── scripts/
 │   ├── deploy-to-s3.sh            # S3 배포 (로컬에서 실행)
 │   └── ec2-setup.sh               # EC2 초기 설정 (최초 1회)
 ├── docker-compose.yml             # 로컬 개발용
 ├── requirements.txt
 ├── requirements-slack-app.txt
-└── requirements-gov-funding.txt
+├── requirements-gov-funding.txt
+└── requirements-ai-news.txt
 ```
 
 ## EC2 Directory Structure
@@ -48,13 +57,15 @@ slack-bots/
 ├── venvs/                # Python 가상환경
 │   ├── slack-app/
 │   ├── scheduler/
-│   └── gov-funding/
+│   ├── gov-funding/
+│   └── ai-news/
 └── logs/                 # 앱 로그
 
 /etc/systemd/system/
 ├── slack-app.service
 ├── scheduler.service
-└── gov-funding.service
+├── gov-funding.service
+└── ai-news.service
 ```
 
 ## Deployment
@@ -130,18 +141,20 @@ sudo bash scripts/ec2-setup.sh
 ```bash
 # 상태 확인
 /home/ubuntu/status.sh
-systemctl status slack-app scheduler gov-funding
+systemctl status slack-app scheduler gov-funding ai-news
 
 # 로그 확인
 /home/ubuntu/logs.sh slack-app           # 실시간 로그
 journalctl -u slack-app -f               # 실시간 로그
 journalctl -u scheduler --since "1 hour ago"
 journalctl -u gov-funding -n 100         # 최근 100줄
+journalctl -u ai-news -f                 # AI News 로그
 
 # 개별 서비스 관리
 sudo systemctl start slack-app
 sudo systemctl stop scheduler
 sudo systemctl restart gov-funding
+sudo systemctl restart ai-news
 
 # 전체 관리 (헬퍼 스크립트)
 /home/ubuntu/start-all.sh
@@ -161,6 +174,7 @@ sudo systemctl restart gov-funding
 | `S3_BUCKET` | S3 버킷 이름 |
 | `SLACK_CHANNEL_ID` | Slack 채널 ID (Gov-Funding 알림용) |
 | `GOV_FUNDING_CHANNEL_ID` | Gov-Funding Q&A 채널 ID |
+| `AI_NEWS_CHANNEL_ID` | AI News 알림 및 Q&A 채널 ID |
 
 ## Key Files
 
@@ -171,6 +185,14 @@ sudo systemctl restart gov-funding
 - `src/gov_funding/crawlers/bizinfo_crawler.py` - Bizinfo 크롤러
 - `src/gov_funding/analyzers/bedrock_analyzer.py` - Bedrock AI 분석
 - `src/gov_funding/notifiers/slack_notifier.py` - Slack 알림
+- `src/ai_news/main.py` - AI 뉴스 모니터링 메인
+- `src/ai_news/crawlers/` - 7개 크롤러 (arXiv, HN, TechCrunch, Anthropic, OpenAI, DeepMind, HF)
+- `src/ai_news/analyzers/bedrock_summarizer.py` - Bedrock 요약·중요도 평가
+- `src/ai_news/notifiers/slack_notifier.py` - AI News Slack 알림
+
+## Notion 규칙
+
+- Notion에서 새 티켓/페이지를 생성할 때 Assignee를 **Shawn Kim** (ID: `20cd872b-594c-810b-9d99-0002e207a7c1`)으로 설정
 
 ## Common Tasks
 
@@ -179,9 +201,15 @@ sudo systemctl restart gov-funding
 2. `base_crawler.py`의 `BaseCrawler` 상속
 3. `src/gov_funding/main.py`에서 크롤러 등록
 
+### Add new AI News crawler
+1. `src/ai_news/crawlers/` 에 새 크롤러 생성
+2. `base_crawler.py`의 `BaseCrawler` 상속
+3. `src/ai_news/main.py`의 `crawlers` 리스트에 추가
+
 ### Modify schedule
 - Scheduler: `src/scheduler/scheduler.py` - `CronTrigger` 수정
 - Gov-Funding: `src/gov_funding/main.py` - `CronTrigger` 수정
+- AI News: `src/ai_news/main.py` - `CronTrigger` 수정 (기본: 매일 8시)
 
 ### Add Slack command
 - `src/slack_app/app.py`에서 `@app.command()` 또는 `@app.message()` 데코레이터 사용
@@ -191,6 +219,12 @@ sudo systemctl restart gov-funding
 - 핵심 함수: `get_gov_funding_context()` (S3 fetch + 1시간 캐시), `_build_gov_funding_prompt()` (프롬프트 구성)
 - S3 경로: `snapshots/{kstartup,bizinfo,nipa}/` 에서 최신 스냅샷 로드
 - 다른 채널에서는 기존 일반 응답 유지
+
+### AI News 채널 Q&A
+- `AI_NEWS_CHANNEL_ID` 채널에서 봇 멘션 시 S3 Vectors 기반 AI 뉴스 Q&A 제공
+- 핵심 함수: `get_ai_news_context()`, `_build_ai_news_prompt()`
+- 벡터 인덱스: `ai_news_articles` (S3 Vectors)
+- 소스/카테고리 기반 메타데이터 필터링 지원
 
 ## Troubleshooting
 

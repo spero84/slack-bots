@@ -27,3 +27,10 @@ module "ec2_slack_bot" {
   allowed_ssh_cidr_blocks = var.ec2_allowed_ssh_cidr_blocks
   root_volume_size        = var.ec2_root_volume_size
 }
+
+# S3 Vectors Module for AI News
+module "s3vectors_ai_news" {
+  source = "./modules/s3vectors"
+
+  vector_bucket_name = "ai-news-articles"
+}

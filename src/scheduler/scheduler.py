@@ -75,6 +75,17 @@ MCP gmail 도구(mcp__gmail__gmail_create_draft, mcp__gmail__gmail_create_reply_
 - 각 메일에 대해 초안만 작성 (Gmail Drafts에 저장)
 - 초안 목록 생성
 - **중요: 메일을 절대 전송하지 마세요. 초안 생성만 허용됩니다.**
+- **초안 형식:** 아래 서명을 포함하여 비즈니스 메일 형식으로 작성:
+  - 인사: "안녕하십니까? Searchdoc의 김성헌입니다."
+  - 본문
+  - 맺음: "감사합니다.\n\n김성헌 드림"
+  - 서명 블록 (HTML 형식으로 작성):
+    김성헌 | Shawn Kim
+    Co-Founder & COO & 정보관리기술사
+    E: shawn.kim@searchdoc.ai
+    M: 010-9113-8566
+    A: 경기 성남시 분당구 대왕판교로 660
+    <img src="https://ci3.googleusercontent.com/mail-sig/AIorK4zO1WNCsIuf3DuXrZVUSmBzSifW4-DS1pB7-XS0bQD6g5kdf7elWmpS1NrdISWtKPSZrGFbck7-Oou_" width="120">
 
 ## 4단계: 결과 보고 (Slack DM) — 반드시 실행!
 MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **반드시 개인 DM**으로 전송:
@@ -86,6 +97,53 @@ MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **반드
   - 🔄 변경된 항목 (태스크 상태 변경 등)
   - ✅ 완료/처리된 항목
 - 변경사항이 없으면 "이전 실행 대비 변경사항 없음"으로 표시
+- **마지막 섹션에 "🎯 오늘의 액션 가이드" 포함 (필수)**:
+  1~3단계 결과를 종합 분석하여, 긴급도·중요도 순으로 해야 할 일을 구체적으로 안내
+
+### Slack 포맷팅 규칙 (필수)
+⚠️ Slack은 마크다운 테이블(| 컬럼 | 컬럼 |)을 지원하지 않습니다. 절대 테이블 형식을 사용하지 마세요.
+
+보고서 전체 구조 (아래 순서와 형식을 반드시 따를 것):
+
+*📋 Searchdoc 일일 업무 요약*
+날짜와 시간을 첫 줄에 표시
+
+---
+
+*1️⃣ Notion Kanban 태스크 현황*
+상태별로 그룹화하여 표시:
+
+*`In Progress` (3건)*
+> • *태스크 제목* — 보드: Product | 마감: 2025-02-12
+> • *태스크 제목* — 보드: LT Internal | 마감: 2025-02-13
+
+*`Ready` (2건)*
+> • *태스크 제목* — 보드: Product | 마감: 2025-02-15
+
+🔴 *긴급/기한 초과*
+> • 🚨 *긴급 태스크 제목* — 마감: *오늘* | 보드: LT Internal
+> • ⚠️ *기한 초과 태스크 제목* — 마감: 2025-02-09 (*2일 초과*) | 보드: Product
+
+---
+
+*2️⃣ Gmail*
+> 📩 *메일 제목* — 발신자명
+>     라벨: `CSP`, `청구서` | 미읽음
+
+---
+
+*3️⃣ 메일 초안*
+> ✏️ *초안 제목* → 수신자
+>     원본: 메일 제목 요약
+
+---
+
+*4️⃣ 🎯 오늘의 액션 가이드*
+1~3단계에서 수집한 정보를 종합 분석하여 아래 내용을 제공:
+- 🚨 *즉시 처리 필요*: 오늘 마감이거나 기한 초과된 태스크, 긴급 회신 필요 메일
+- ⏰ *오늘 중 처리 권장*: 내일 마감 태스크, 중요 메일 회신
+- 📌 *이번 주 내 처리*: 곧 마감되는 태스크, 팔로업 필요 항목
+- 각 항목에 구체적인 행동 제안 포함 (예: "XX 메일에 YY 내용으로 회신 필요", "ZZ 태스크 상태를 In Review로 변경 권장")
 """
 
 def format_event(event):
@@ -151,7 +209,7 @@ def run_workflow():
 
     # 이전 세션이 있으면 --resume, 없으면 새 세션
     saved_sid = get_saved_session_id()
-    cmd = [CLAUDE_PATH, "-p", "--model", "opus", WORKFLOW_PROMPT]
+    cmd = [CLAUDE_PATH, "-p", "--model", "global.anthropic.claude-opus-4-6-v1", WORKFLOW_PROMPT]
     if saved_sid:
         cmd += ["--resume", saved_sid]
         logger.info(f"이전 세션 이어서 실행: {saved_sid}")

@@ -261,11 +261,32 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+# ai-news.service
+cat > /etc/systemd/system/ai-news.service << 'EOF'
+[Unit]
+Description=AI News Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/slack-bots
+EnvironmentFile=/home/ubuntu/slack-bots/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/venvs/ai-news/bin/python -m src.ai_news.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # systemd 데몬 리로드
 systemctl daemon-reload
 
 # 서비스 활성화 (부팅 시 자동 시작)
-systemctl enable slack-app scheduler gov-funding
+systemctl enable slack-app scheduler gov-funding ai-news
 
 # ============================================
 # 운영 스크립트 심볼릭 링크 생성
@@ -277,6 +298,7 @@ SCRIPTS=(
     start-slack-app.sh
     start-scheduler.sh
     start-gov-funding.sh
+    start-ai-news.sh
     stop-all.sh
     restart-all.sh
     status.sh
@@ -309,6 +331,7 @@ echo "Systemd 서비스:"
 echo "  - slack-app.service"
 echo "  - scheduler.service"
 echo "  - gov-funding.service"
+echo "  - ai-news.service"
 echo ""
 echo "다음 단계:"
 echo "  1. /home/ubuntu/download-source.sh  # 소스 다운로드"

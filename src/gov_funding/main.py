@@ -141,7 +141,8 @@ async def run_workflow() -> dict:
             if key not in existing_keys:
                 combined_payload.new_announcements.append(ann)
 
-        # 마감임박 식별 (기존 공고 중 d_day 변경)
+        # 마감임박 식별 (마일스톤 기반: D-7, D-3 시점 알림)
+        DEADLINE_MILESTONES = [7, 3]
         existing_filtered_keys = [
             f"{a.source.value}_{a.id}"
             for a in final_filtered
@@ -151,11 +152,19 @@ async def run_workflow() -> dict:
             prev_metadata = vector_storage.get_vectors_metadata(existing_filtered_keys)
             for ann in final_filtered:
                 key = f"{ann.source.value}_{ann.id}"
-                if key in prev_metadata:
-                    prev_d_day = prev_metadata[key].get("d_day", -1)
-                    if ann.d_day is not None and 0 < ann.d_day <= config.deadline_alert_days:
-                        if prev_d_day == -1 or prev_d_day > config.deadline_alert_days:
-                            combined_payload.deadline_soon.append(ann)
+                if key not in prev_metadata:
+                    continue
+                if ann.d_day is None or ann.d_day <= 0:
+                    continue
+
+                prev_d_day = prev_metadata[key].get("d_day", -1)
+
+                # 마일스톤 전환 감지: prev_d_day > milestone >= current d_day
+                for milestone in DEADLINE_MILESTONES:
+                    if ann.d_day <= milestone and (prev_d_day == -1 or prev_d_day > milestone):
+                        combined_payload.deadline_soon.append(ann)
+                        logger.info(f"마감 리마인더: {ann.title} (D-{ann.d_day}, 마일스톤: D-{milestone})")
+                        break
 
         # 벡터 저장 (전체 upsert - 신규+기존 모두 업데이트)
         vector_storage.upsert_announcements(final_filtered)

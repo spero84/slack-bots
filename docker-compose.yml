@@ -42,3 +42,17 @@ services:
     environment:
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
       - AWS_DEFAULT_REGION=ap-northeast-2
+
+  ai-news:
+    build:
+      context: .
+      dockerfile: docker/ai-news/Dockerfile
+    container_name: ai-news
+    restart: always
+    environment:
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - AI_NEWS_CHANNEL_ID=${AI_NEWS_CHANNEL_ID}
+      - AWS_DEFAULT_REGION=ap-northeast-2
+      - S3_BUCKET=${S3_BUCKET}
+      - BEDROCK_REGION=${BEDROCK_REGION}
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID}

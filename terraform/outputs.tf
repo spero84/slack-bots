@@ -87,3 +87,14 @@ output "ec2_ssh_command" {
   description = "SSH command to connect"
   value       = module.ec2_slack_bot.ssh_command
 }
+
+# S3 Vectors Outputs
+output "s3vectors_ai_news_arn" {
+  description = "ARN of the AI News S3 Vectors bucket"
+  value       = module.s3vectors_ai_news.vector_bucket_arn
+}
+
+output "s3vectors_ai_news_name" {
+  description = "Name of the AI News S3 Vectors bucket"
+  value       = module.s3vectors_ai_news.vector_bucket_name
+}

@@ -36,12 +36,21 @@ WORKING_DIR = os.environ.get("CLAUDE_WORKING_DIR", "/app/workspace")
 # Claude CLI 경로 (systemd 환경에서 PATH에 없을 수 있음)
 CLAUDE_PATH = os.path.join(HOME_DIR, ".local", "bin", "claude")
 
+# 시스템 규칙 (모든 Claude CLI 호출에 적용)
+SYSTEM_RULES = (
+    "Notion에서 새 티켓/페이지를 생성할 때 반드시 Assignee(담당자)를 "
+    "Shawn Kim (people ID: 20cd872b-594c-810b-9d99-0002e207a7c1)으로 설정하세요."
+)
+
 # Gov-Funding Q&A 설정
 GOV_FUNDING_CHANNEL_ID = os.environ.get("GOV_FUNDING_CHANNEL_ID", "")
 S3_VECTOR_BUCKET = os.environ.get("S3_BUCKET", "gov-funding-monitor-snapshots")
 AWS_REGION = os.environ.get("AWS_REGION", "ap-northeast-2")
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "us-west-2")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL_ID", "amazon.titan-embed-text-v2:0")
+
+# AI News Q&A 설정
+AI_NEWS_CHANNEL_ID = os.environ.get("AI_NEWS_CHANNEL_ID", "")
 
 # S3 Vectors / Bedrock 클라이언트 (lazy init)
 _s3v_client = None
@@ -87,7 +96,7 @@ def get_gov_funding_context(question):
             "vectorBucketName": S3_VECTOR_BUCKET,
             "indexName": "announcements",
             "queryVector": {"float32": embedding},
-            "topK": 15,
+            "topK": 5,
             "returnMetadata": True,
             "returnDistance": True,
         }
@@ -174,6 +183,152 @@ def _format_vector_results(vectors):
     return "\n\n".join(lines)
 
 
+def get_ai_news_context(question):
+    """사용자 질문으로 AI News S3 Vectors 검색 → 관련 기사 컨텍스트 반환"""
+    if not S3_VECTOR_BUCKET:
+        return ""
+
+    try:
+        logger.info(f"AI News 벡터 검색 시작: {question[:50]}")
+        bedrock = _get_bedrock_embed_client()
+        resp = bedrock.invoke_model(
+            modelId=EMBEDDING_MODEL,
+            body=json.dumps({"inputText": question, "dimensions": 1024}),
+        )
+        embedding = json.loads(resp["body"].read())["embedding"]
+
+        metadata_filter = _extract_ai_news_filter(question)
+
+        s3v = _get_s3v_client()
+        kwargs = {
+            "vectorBucketName": S3_VECTOR_BUCKET,
+            "indexName": "ainewsarticles",
+            "queryVector": {"float32": embedding},
+            "topK": 5,
+            "returnMetadata": True,
+            "returnDistance": True,
+        }
+        if metadata_filter:
+            kwargs["filter"] = metadata_filter
+
+        results = s3v.query_vectors(**kwargs)
+        vectors = results.get("vectors", [])
+        logger.info(f"AI News 벡터 검색 결과: {len(vectors)}건")
+
+        if len(vectors) < 3 and metadata_filter:
+            kwargs.pop("filter", None)
+            results = s3v.query_vectors(**kwargs)
+            vectors = results.get("vectors", [])
+
+        return _format_ai_news_results(vectors)
+
+    except Exception as e:
+        logger.error(f"AI News 벡터 검색 에러: {e}")
+        return ""
+
+
+def _extract_ai_news_filter(question):
+    """질문에서 AI News 메타데이터 필터 추출"""
+    q = question.lower()
+
+    source_map = {
+        "arxiv": "arxiv", "아카이브": "arxiv",
+        "hacker news": "hackernews", "해커뉴스": "hackernews", "hn": "hackernews",
+        "techcrunch": "techcrunch", "테크크런치": "techcrunch",
+        "anthropic": "anthropic", "앤쓰로픽": "anthropic",
+        "openai": "openai",
+        "deepmind": "deepmind", "딥마인드": "deepmind",
+        "hugging face": "huggingface", "허깅페이스": "huggingface",
+        "ai타임즈": "aitimes", "aitimes": "aitimes", "ai times": "aitimes",
+        "itworld": "itworld", "아이티월드": "itworld",
+        "전자신문": "etnews", "etnews": "etnews",
+        "itdaily": "itdaily", "아이티데일리": "itdaily", "it daily": "itdaily",
+        "aws": "aws_blog", "aws blog": "aws_blog",
+        "azure": "azure_blog", "azure blog": "azure_blog",
+        "google blog": "google_blog", "구글 블로그": "google_blog",
+        "ms research": "ms_research", "마이크로소프트 리서치": "ms_research", "microsoft research": "ms_research",
+        "google research": "google_research", "구글 리서치": "google_research",
+        "medium": "medium", "미디엄": "medium",
+    }
+    for keyword, source in source_map.items():
+        if keyword in q:
+            return {"source": source}
+
+    if any(kw in q for kw in ["논문", "paper", "연구"]):
+        return {"category": "paper"}
+    if any(kw in q for kw in ["회사", "발표", "출시", "company"]):
+        return {"category": "company"}
+    if any(kw in q for kw in ["뉴스", "news", "산업"]):
+        return {"category": "industry"}
+
+    return None
+
+
+def _format_ai_news_results(vectors):
+    """AI News 벡터 검색 결과를 텍스트로 포맷팅"""
+    if not vectors:
+        return ""
+
+    lines = []
+    for i, v in enumerate(vectors, 1):
+        meta = v.get("metadata", {})
+        distance = v.get("distance")
+        parts = [f"[{i}] {meta.get('title', '제목 없음')}"]
+        if meta.get("source"):
+            parts.append(f"  출처: {meta['source']}")
+        if meta.get("category"):
+            parts.append(f"  카테고리: {meta['category']}")
+        if meta.get("authors"):
+            parts.append(f"  저자: {meta['authors']}")
+        if meta.get("ai_summary"):
+            parts.append(f"  요약: {meta['ai_summary']}")
+        elif meta.get("summary"):
+            parts.append(f"  요약: {meta['summary']}")
+        if meta.get("url"):
+            parts.append(f"  URL: {meta['url']}")
+        if meta.get("importance_score") is not None:
+            parts.append(f"  중요도: {meta['importance_score']}")
+        if meta.get("tags"):
+            parts.append(f"  태그: {meta['tags']}")
+        if distance is not None:
+            parts.append(f"  유사도: {1 - distance:.3f}")
+        lines.append("\n".join(parts))
+
+    return "\n\n".join(lines)
+
+
+def _build_ai_news_prompt(question, context):
+    """AI News 채널용 프롬프트 구성"""
+    if not context:
+        return (
+            f"사용자 질문: {question}\n\n"
+            "현재 AI 뉴스 데이터가 없습니다. "
+            "데이터가 아직 수집되지 않았을 수 있습니다.\n"
+            "직접 확인할 수 있는 사이트:\n"
+            "- arXiv: https://arxiv.org/list/cs.AI/recent\n"
+            "- Hacker News: https://news.ycombinator.com/\n"
+            "- TechCrunch AI: https://techcrunch.com/category/artificial-intelligence/\n\n"
+            "위 안내와 함께 질문에 최대한 답변해 주세요."
+        )
+
+    count = context.count("\n[")
+    if context.startswith("["):
+        count += 1
+    return (
+        "당신은 AI/ML 분야 전문 어시스턴트입니다. "
+        "아래는 사용자 질문과 가장 관련성 높은 AI 뉴스/논문 데이터입니다 (벡터 유사도 검색 결과).\n\n"
+        "규칙:\n"
+        "- 데이터에 있는 정보만 기반으로 답변하세요\n"
+        "- 관련 기사/논문의 URL을 반드시 포함하세요\n"
+        "- 중요도가 높은 기사를 우선 추천하세요\n"
+        "- 기술적 내용을 이해하기 쉽게 설명하세요\n"
+        "- Slack 메시지로 출력되므로 Slack mrkdwn 형식을 사용하세요\n\n"
+        f"=== 검색된 AI 뉴스/논문 ({count}건) ===\n\n"
+        f"{context}\n\n"
+        f"=== 사용자 질문 ===\n{question}"
+    )
+
+
 def _build_gov_funding_prompt(question, context):
     """gov-funding 채널용 프롬프트 구성"""
     if not context:
@@ -229,12 +384,16 @@ def call_claude(prompt, session_id, is_new_session):
         # 새 세션이면 --session-id, 기존 세션이면 --resume 사용
         if is_new_session and session_id not in active_sessions:
             cmd = [CLAUDE_PATH, "-p", "--model", "global.anthropic.claude-opus-4-6-v1",
-                   "--max-turns", "1",
+                   "--max-turns", "25",
+                   "--dangerously-skip-permissions",
+                   "--append-system-prompt", SYSTEM_RULES,
                    "--session-id", session_id,
                    "--output-format", "text", prompt]
         else:
             cmd = [CLAUDE_PATH, "-p", "--model", "global.anthropic.claude-opus-4-6-v1",
-                   "--max-turns", "1",
+                   "--max-turns", "25",
+                   "--dangerously-skip-permissions",
+                   "--append-system-prompt", SYSTEM_RULES,
                    "--resume", session_id,
                    "--output-format", "text", prompt]
 
@@ -303,10 +462,13 @@ def handle_mention(event, say):
 
     # 처리 중 메시지 표시
     say(f"<@{user}> 처리 중...", thread_ts=thread_ts)
-    # Gov-Funding 채널이면 S3 Vectors 벡터 검색으로 관련 공고 컨텍스트 주입
+    # 채널별 컨텍스트 주입
     if GOV_FUNDING_CHANNEL_ID and channel == GOV_FUNDING_CHANNEL_ID:
         context = get_gov_funding_context(clean_text)
         prompt = _build_gov_funding_prompt(clean_text, context)
+    elif AI_NEWS_CHANNEL_ID and channel == AI_NEWS_CHANNEL_ID:
+        context = get_ai_news_context(clean_text)
+        prompt = _build_ai_news_prompt(clean_text, context)
     else:
         prompt = clean_text
 

@@ -135,11 +135,15 @@ class SlackNotifier:
         if page == 0:
             # 첫 페이지: 헤더 포함
             today = datetime.now().strftime("%Y-%m-%d")
+            if total_new == 0 and payload.deadline_soon:
+                header_text = f"⏰ 마감 리마인더 ({today})"
+            else:
+                header_text = f"📢 지원사업 공고 알림 ({today})"
             blocks.append({
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": f"📢 지원사업 공고 알림 ({today})",
+                    "text": header_text,
                     "emoji": True,
                 },
             })
