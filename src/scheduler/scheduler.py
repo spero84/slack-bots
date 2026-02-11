@@ -17,9 +17,6 @@ os.makedirs(LOG_DIR, exist_ok=True)
 # Claude CLI 경로 (systemd 환경에서 PATH에 없을 수 있음)
 CLAUDE_PATH = os.path.join(HOME_DIR, ".local", "bin", "claude")
 
-# 스케줄러 전용 세션 ID 파일 (--resume 용)
-SESSION_FILE = os.path.join(LOG_DIR, "scheduler_session_id.txt")
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -27,9 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 WORKFLOW_PROMPT = """
-⚠️ 중요: 이것은 정기 실행입니다. 이전 세션에서 이미 실행한 적이 있더라도, 아래 모든 단계를 처음부터 다시 실행해야 합니다. 이전 결과를 요약하거나 참조만 하지 마세요. 반드시 MCP 도구를 호출하여 최신 데이터를 조회하고, 4단계까지 모두 완료하세요.
-
-다음 워크플로우를 순서대로 실행해주세요:
+다음 워크플로우를 순서대로 실행해주세요. 반드시 MCP 도구를 호출하여 최신 데이터를 조회하고, 4단계까지 모두 완료하세요.
 
 ## 1단계: Notion Kanban 확인
 MCP notion 도구(mcp__notion__*)를 직접 호출하여:
@@ -38,7 +33,6 @@ MCP notion 도구(mcp__notion__*)를 직접 호출하여:
 - Ready, In Progress, In Review 상태의 모든 태스크 조회
 - **오늘 마감인 태스크는 🔴 긴급으로 강조 표시**
 - 기한 지난 태스크 알림
-- 📊 이전 실행 결과와 비교하여 **변경사항** 표시 (새로 추가된 태스크, 상태 변경, 완료된 태스크)
 
 ## 2단계: Gmail 확인 및 라벨링
 MCP gmail 도구(mcp__gmail__*)를 직접 호출하여:
@@ -92,11 +86,6 @@ MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **반드
 - **Shawn Kim User ID: U09169NDUKA** (채널 ID가 아님!)
 - channel 파라미터에 **U09169NDUKA** 사용
 - ⚠️ 절대 C로 시작하는 채널 ID 사용 금지
-- 보고 내용에 **이전 실행 대비 변경사항**을 포함:
-  - 🆕 새로운 항목 (새 태스크, 새 메일)
-  - 🔄 변경된 항목 (태스크 상태 변경 등)
-  - ✅ 완료/처리된 항목
-- 변경사항이 없으면 "이전 실행 대비 변경사항 없음"으로 표시
 - **마지막 섹션에 "🎯 오늘의 액션 가이드" 포함 (필수)**:
   1~3단계 결과를 종합 분석하여, 긴급도·중요도 순으로 해야 할 일을 구체적으로 안내
 
@@ -211,29 +200,6 @@ def format_event(event):
     return "\n".join(lines)
 
 
-def get_saved_session_id():
-    """저장된 스케줄러 전용 세션 ID 반환"""
-    try:
-        if os.path.exists(SESSION_FILE):
-            with open(SESSION_FILE, "r") as f:
-                sid = f.read().strip()
-                if sid:
-                    return sid
-    except Exception:
-        pass
-    return None
-
-
-def save_session_id(session_id):
-    """스케줄러 전용 세션 ID 저장"""
-    try:
-        with open(SESSION_FILE, "w") as f:
-            f.write(session_id)
-        logger.info(f"세션 ID 저장: {session_id}")
-    except Exception as e:
-        logger.error(f"세션 ID 저장 실패: {e}")
-
-
 def run_workflow():
     """Claude CLI로 워크플로우 실행 (실시간 로그)"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -242,18 +208,13 @@ def run_workflow():
 
     logger.info(f"워크플로우 시작 - 실시간 로그: tail -f {detail_log}")
 
-    # 이전 세션이 있으면 --resume, 없으면 새 세션
-    saved_sid = get_saved_session_id()
-    cmd = [CLAUDE_PATH, "-p", "--model", "global.anthropic.claude-opus-4-6-v1", WORKFLOW_PROMPT]
-    if saved_sid:
-        cmd += ["--resume", saved_sid]
-        logger.info(f"이전 세션 이어서 실행: {saved_sid}")
-    else:
-        logger.info("새 세션으로 실행")
-    cmd += [
+    cmd = [
+        CLAUDE_PATH, "-p",
+        "--model", "global.anthropic.claude-opus-4-6-v1",
+        WORKFLOW_PROMPT,
         "--dangerously-skip-permissions",
         "--verbose",
-        "--output-format", "stream-json"
+        "--output-format", "stream-json",
     ]
 
     try:
@@ -284,12 +245,6 @@ def run_workflow():
                     event = json.loads(line)
                     formatted = format_event(event)
                     log_f.write(formatted + "\n\n")
-
-                    # result 이벤트에서 session_id 추출 후 저장
-                    if event.get("type") == "result":
-                        sid = event.get("session_id")
-                        if sid:
-                            save_session_id(sid)
                 except json.JSONDecodeError:
                     log_f.write(f"[RAW] {line}\n\n")
                 log_f.flush()
