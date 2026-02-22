@@ -25,6 +25,7 @@ echo "[3/4] gov-funding venv 설정..."
 rm -rf /home/ubuntu/venvs/gov-funding
 uv venv /home/ubuntu/venvs/gov-funding --python python3.13
 uv pip install -r requirements-gov-funding.txt --python /home/ubuntu/venvs/gov-funding/bin/python
+uv pip install olefile --python /home/ubuntu/venvs/gov-funding/bin/python
 uv pip install playwright --python /home/ubuntu/venvs/gov-funding/bin/python
 /home/ubuntu/venvs/gov-funding/bin/playwright install chromium
 

@@ -39,7 +39,25 @@ CLAUDE_PATH = os.path.join(HOME_DIR, ".local", "bin", "claude")
 # 시스템 규칙 (모든 Claude CLI 호출에 적용)
 SYSTEM_RULES = (
     "Notion에서 새 티켓/페이지를 생성할 때 반드시 Assignee(담당자)를 "
-    "Shawn Kim (people ID: 20cd872b-594c-810b-9d99-0002e207a7c1)으로 설정하세요."
+    "Shawn Kim (people ID: 20cd872b-594c-810b-9d99-0002e207a7c1)으로 설정하세요.\n\n"
+    "응답은 Slack 메시지로 출력됩니다. 반드시 Slack mrkdwn 형식을 사용하세요:\n"
+    "- 굵게: *텍스트* (markdown **텍스트** 사용 금지)\n"
+    "- 기울임: _텍스트_\n"
+    "- 취소선: ~텍스트~\n"
+    "- 링크: <URL|표시텍스트> (markdown [텍스트](URL) 사용 금지)\n"
+    "- 표(table)는 Slack에서 지원하지 않으므로 절대 사용하지 마세요. "
+    "대신 굵은 레이블과 줄바꿈으로 정보를 나열하세요.\n"
+    "- # 헤더 문법 사용 금지. 섹션 제목은 *굵게* 처리하세요.\n"
+    "- 목록은 • 또는 - 를 사용하세요.\n"
+    "- `---` 수평선은 Slack에서 렌더링되지 않으므로 사용 금지. "
+    "구분선이 필요하면 `━━━━━━━━━━━━━━━━━━━━━━━━` 유니코드 문자를 사용하세요.\n\n"
+    "일일업무 보고(Notion 태스크 현황, Gmail 요약, 메일 초안 작성 등)는 별도 scheduler 서비스가 "
+    "전용 채널 <#C0AEW7LF0RJ>에 자동으로 전송합니다 (평일 9,11,13,15,17시).\n\n"
+    "메일 초안 작성 시 규칙:\n"
+    "- Gmail API 응답의 `to` 필드를 반드시 확인하세요\n"
+    "- to에 shawn.kim@searchdoc.ai가 없으면 → 초안 작성 제외!\n"
+    "- 예: to가 ['joonsun@searchdoc.ai']인 경우 → 내가 받은 메일이 아님 → 제외\n"
+    "- CC/BCC에만 포함된 메일도 제외\n"
 )
 
 # Gov-Funding Q&A 설정
@@ -403,7 +421,7 @@ def call_claude(prompt, session_id, is_new_session):
             cmd,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=600,
             cwd=WORKING_DIR
         )
 
@@ -416,7 +434,7 @@ def call_claude(prompt, session_id, is_new_session):
             return f"에러: {result.stdout or result.stderr}"
     except subprocess.TimeoutExpired:
         logger.error(f"Claude 타임아웃 - session: {session_id}")
-        return "에러: Claude 응답 시간이 초과되었습니다 (5분)"
+        return "에러: Claude 응답 시간이 초과되었습니다 (10분)"
     except Exception as e:
         logger.error(f"Claude 예외 - session: {session_id}, error: {e}")
         return f"에러: {str(e)}"
@@ -429,6 +447,10 @@ def handle_message(event, say):
     if event.get("bot_id"):
         return
 
+    # message_changed, message_deleted 등 서브타입 이벤트 무시 (URL unfurl 등)
+    if event.get("subtype"):
+        return
+
     user = event.get("user")
     text = event.get("text", "")
     channel_type = event.get("channel_type")
@@ -436,6 +458,11 @@ def handle_message(event, say):
     # DM인 경우 - 사용자별 세션
     if channel_type == "im":
         logger.info(f"DM 수신 - User: {user}, Text: {text}")
+
+        if not text.strip():
+            say("무엇을 도와드릴까요?")
+            return
+
         # 처리 중 메시지 표시
         say("처리 중...")
         # 사용자별 세션으로 Claude CLI 호출

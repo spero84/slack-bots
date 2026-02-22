@@ -66,6 +66,10 @@ MCP gmail 도구(mcp__gmail__gmail_create_draft, mcp__gmail__gmail_create_reply_
   - 내가 직접 받은 메일이 아닌 경우 (To에 shawn.kim@searchdoc.ai가 없는 메일)
   - 참조(CC/BCC)에만 포함된 메일
 - **초안 작성 대상:** To에 shawn.kim@searchdoc.ai가 직접 포함된 외부 발신 메일만 해당
+- **중요: Gmail API 응답의 `to` 필드를 반드시 확인하세요.**
+  - `to` 배열에 shawn.kim@searchdoc.ai가 포함되어 있지 않으면 → 초안 작성 제외
+  - 예: to=["joonsun@searchdoc.ai"] → 내가 받은 메일이 아님 → 제외!
+  - 예: to=["shawn.kim@searchdoc.ai"] → 초안 작성 대상 ✅
 - 각 메일에 대해 초안만 작성 (Gmail Drafts에 저장)
 - 초안 목록 생성
 - **중요: 메일을 절대 전송하지 마세요. 초안 생성만 허용됩니다.**
@@ -81,11 +85,10 @@ MCP gmail 도구(mcp__gmail__gmail_create_draft, mcp__gmail__gmail_create_reply_
     A: 경기 성남시 분당구 대왕판교로 660
     <img src="https://ci3.googleusercontent.com/mail-sig/AIorK4zO1WNCsIuf3DuXrZVUSmBzSifW4-DS1pB7-XS0bQD6g5kdf7elWmpS1NrdISWtKPSZrGFbck7-Oou_" width="120">
 
-## 4단계: 결과 보고 (Slack DM) — 반드시 실행!
-MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **반드시 개인 DM**으로 전송:
-- **Shawn Kim User ID: U09169NDUKA** (채널 ID가 아님!)
-- channel 파라미터에 **U09169NDUKA** 사용
-- ⚠️ 절대 C로 시작하는 채널 ID 사용 금지
+## 4단계: 결과 보고 (Slack 채널) — 반드시 실행!
+MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **전용 업무 보고 채널**로 전송:
+- **채널 ID: C0AEW7LF0RJ**
+- channel 파라미터에 **C0AEW7LF0RJ** 사용
 - **마지막 섹션에 "🎯 오늘의 액션 가이드" 포함 (필수)**:
   1~3단계 결과를 종합 분석하여, 긴급도·중요도 순으로 해야 할 일을 구체적으로 안내
 
@@ -153,9 +156,12 @@ MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **반드
 
 *3️⃣ 메일 초안*
 초안이 없으면 "작성 대상 없음"으로 표시.
+⚠️ 절대 테이블 형식 사용 금지. 반드시 아래 불릿 포인트 형식으로 표시.
 
 > ✏️ *초안 제목* → 수신자
 >     원본: 메일 제목 요약
+> ✏️ *회의 일정 확인 회신* → 김재순 과장
+>     원본: Rerank 모델 도입 검토 관련 기술 논의 요청
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 

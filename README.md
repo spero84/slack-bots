@@ -1,423 +1,433 @@
 # Slack Bots
 
-Searchdoc Slack 봇 통합 프로젝트 - Gov Funding Monitor, Scheduler, Slack App을 AWS EC2에 Docker로 배포합니다.
+Slack 기반 업무 자동화 플랫폼. 정부 지원사업 공고 모니터링, AI/ML 뉴스 크롤링, 업무 워크플로우 자동화, Claude CLI 연동 Slack 봇을 EC2에서 systemd 서비스로 운영한다.
 
-## 서비스 구성
+4개의 독립 서비스가 각각 별도 Python 가상환경(uv)으로 분리되어 있으며, S3를 통해 소스 코드를 배포하고 systemd로 프로세스를 관리한다.
 
-| 서비스 | 컨테이너 | 스케줄 | 설명 |
-|--------|----------|--------|------|
-| Slack App | `slack-app` | 상시 실행 (Socket Mode) | Claude CLI 기반 Slack 봇 (Gov-Funding Q&A 포함) |
-| Scheduler | `scheduler` | 평일 9,11,13,15,17시 KST | Claude CLI 기반 업무 자동화 |
-| Gov-Funding | `gov-funding` | 매일 09:00 KST | 정부 지원사업 공고 모니터링 |
-
-## 아키텍처
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                          EC2 Instance                           │
-│                        (Ubuntu 22.04+)                          │
-│                                                                 │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
-│  │   slack-app     │  │   scheduler     │  │   gov-funding   │  │
-│  │   (Docker)      │  │   (Docker)      │  │   (Docker)      │  │
-│  │                 │  │                 │  │                 │  │
-│  │  Socket Mode    │  │  APScheduler    │  │  APScheduler    │  │
-│  │  Slack Bolt     │  │  Claude CLI     │  │  Playwright     │  │
-│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘  │
-│           │                    │                    │           │
-└───────────┼────────────────────┼────────────────────┼───────────┘
-            │                    │                    │
-            ▼                    ▼                    ▼
-     ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-     │  Slack API   │    │  Slack API   │    │   Bedrock    │
-     │              │    │              │    │   S3 Bucket  │
-     └──────────────┘    └──────────────┘    └──────────────┘
+┌─────────────────────────────────────────────────────┐
+│                      EC2 Instance                    │
+│                                                      │
+│  ┌──────────────┐  ┌──────────────┐                 │
+│  │  slack-app    │  │  scheduler   │                 │
+│  │  (Socket Mode)│  │  (평일 2h)   │                 │
+│  │  Claude CLI   │  │  Notion/Gmail│                 │
+│  └──────┬───────┘  └──────┬───────┘                 │
+│         │                  │                         │
+│  ┌──────┴───────┐  ┌──────┴───────┐                 │
+│  │  gov-funding  │  │  ai-news     │                 │
+│  │  (매일 9시)   │  │  (월수금 8시) │                 │
+│  │  9개 크롤러   │  │  17개 크롤러  │                 │
+│  └──────┬───────┘  └──────┬───────┘                 │
+│         │                  │                         │
+│         └────────┬─────────┘                         │
+│                  ▼                                    │
+│  ┌──────────────────────────────┐                    │
+│  │  AWS (S3 Vectors, Bedrock)   │                    │
+│  │  Slack API / Gmail API       │                    │
+│  └──────────────────────────────┘                    │
+└─────────────────────────────────────────────────────┘
 ```
 
-## 사전 요구사항
+## Services
 
-### AWS 리소스
+### 1. slack-app — Slack Socket Mode 봇
 
-| 리소스 | 요구사항 |
-|--------|----------|
-| EC2 인스턴스 | Ubuntu 22.04/24.04, t3.medium 이상 권장 |
-| IAM Role | EC2에 연결, 아래 권한 필요 |
-| Secrets Manager | Slack 토큰 저장 |
-| S3 버킷 | 소스 및 데이터 저장 |
+Claude CLI를 subprocess로 호출하여 Slack 메시지에 응답하는 봇.
 
-### IAM Role 권한
+- **DM**: 사용자별 세션 유지
+- **채널 멘션**: 스레드별 세션 유지
+- **gov-funding 채널**: S3 Vectors 검색으로 관련 공고 컨텍스트 주입
+- **ai-news 채널**: S3 Vectors 검색으로 관련 기사 컨텍스트 주입
+- venv: `/home/ubuntu/venvs/slack-app`
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": "secretsmanager:GetSecretValue",
-      "Resource": "arn:aws:secretsmanager:ap-northeast-2:*:secret:slack-bots/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:ListBucket"
-      ],
-      "Resource": [
-        "arn:aws:s3:::slack-bots-prod-snapshots",
-        "arn:aws:s3:::slack-bots-prod-snapshots/*"
-      ]
-    },
-    {
-      "Effect": "Allow",
-      "Action": "bedrock:InvokeModel",
-      "Resource": "*"
-    }
-  ]
-}
-```
+### 2. scheduler — 업무 자동화 워크플로우
 
-### Secrets Manager 설정
+Claude CLI로 Notion Kanban 확인, Gmail 요약/초안 작성, Slack 보고를 자동 실행.
+
+- 스케줄: 평일 9, 11, 13, 15, 17시 (APScheduler, Asia/Seoul)
+- MCP 도구: Notion, Gmail, Slack, Calendar
+- venv: `/home/ubuntu/venvs/scheduler`
+
+### 3. gov-funding — 정부 지원사업 모니터링
+
+9개 정부 사이트에서 지원사업 공고를 크롤링하고, 관련성 필터링 후 알림 전송.
+
+- **크롤러**: K-Startup, 기업마당(Bizinfo), NIPA, NIA, IITP, JOINTIPS, MSIT(과기정통부), MSS(중기부), MOTIE(산자부)
+- **Playwright 의존**: KStartup, IITP, MSIT, MOTIE (없으면 자동 스킵)
+- **워크플로우**: crawl → deduplicate → deadline_filter(2개월) → keyword_filter → bedrock_filter(Claude) → S3 Vectors 비교 → Slack/Gmail 알림
+- 스케줄: 매일 9시 (시작 시 1회 강제 실행)
+- venv: `/home/ubuntu/venvs/gov-funding`
+
+### 4. ai-news — AI 뉴스 모니터링
+
+17개 소스에서 AI/ML 관련 뉴스와 논문을 크롤링하고 요약하여 알림 전송.
+
+- **크롤러**: arXiv, Hacker News, TechCrunch, Anthropic, OpenAI, DeepMind, Hugging Face, AI Times, ITWorld, ETNews, IT Daily, AWS Blog, Azure Blog, Google Blog, MS Research, Google Research, Medium
+- **카테고리**: Paper, Company News, Industry News
+- **워크플로우**: crawl → deduplicate(제목 유사도) → S3 Vectors 신규 식별 → bedrock_summarize(중요도 평가) → vector storage → Slack 알림
+- 스케줄: 월/수/금 8시 (시작 시 1회 실행)
+- venv: `/home/ubuntu/venvs/ai-news`
+
+## Prerequisites
+
+- **Python 3.13** (deadsnakes PPA)
+- **uv** (Python 패키지 매니저)
+- **Node.js 22.x** (Claude Code 런타임)
+- **Claude Code CLI** (`~/.local/bin/claude`)
+- **AWS CLI v2** (S3, Bedrock 접근)
+- **Slack App** (Bot Token + App Token, Socket Mode 활성화)
+- **Gmail API** credentials (선택)
+
+## Quick Start
 
 ```bash
-# Slack Bot Token (xoxb-...)
-aws secretsmanager create-secret \
-    --name slack-bots/slack-bot-token \
-    --secret-string "xoxb-your-bot-token" \
-    --region ap-northeast-2
+# 1. EC2 초기 설정 (Python, Node.js, uv, Claude Code, AWS CLI, systemd 서비스)
+sudo ./scripts/ec2-setup.sh
 
-# Slack App Token (xapp-...) - Socket Mode용
-aws secretsmanager create-secret \
-    --name slack-bots/slack-app-token \
-    --secret-string "xapp-your-app-token" \
-    --region ap-northeast-2
-```
+# 2. 소스 다운로드
+/home/ubuntu/download-source.sh
 
-### S3 버킷 생성
+# 3. 환경변수 설정 (.env가 S3에서 자동 다운로드되지 않은 경우)
+cp .env.example .env
+vi .env
 
-```bash
-aws s3 mb s3://slack-bots-prod-snapshots --region ap-northeast-2
-```
+# 4. Python 가상환경 설정 (uv 기반)
+/home/ubuntu/setup-venvs.sh
 
----
-
-## 배포 절차
-
-### Step 1: 로컬에서 S3로 소스 업로드
-
-```bash
-# 프로젝트 루트에서 실행
-./scripts/deploy-to-s3.sh
-```
-
-이 스크립트는:
-- 소스 코드를 ZIP으로 압축
-- `s3://slack-bots-prod-snapshots/source/slack-bots-source.zip`로 업로드
-
-### Step 2: EC2 초기 설정 (최초 1회)
-
-```bash
-# 1. SSH로 EC2 접속
-ssh -i your-key.pem ubuntu@<ec2-public-ip>
-
-# 2. 임시 디렉토리에서 소스 다운로드
-cd /tmp
-aws s3 cp s3://slack-bots-prod-snapshots/source/slack-bots-source.zip . --region ap-northeast-2
-unzip slack-bots-source.zip
-
-# 3. 초기 설정 스크립트 실행 (sudo 필요)
-sudo bash scripts/ec2-setup.sh
-
-# 4. SSH 재접속 (docker 그룹 적용)
-exit
-ssh -i your-key.pem ubuntu@<ec2-public-ip>
-```
-
-**ec2-setup.sh가 설치하는 항목:**
-- Docker CE
-- Python 3.11
-- Node.js 20.x
-- AWS CLI v2
-- uv (Python 패키지 매니저)
-- Claude Code CLI
-- jq
-
-**ec2-setup.sh가 생성하는 스크립트:**
-
-| 스크립트 | 경로 | 설명 |
-|----------|------|------|
-| `load-env.sh` | `/home/ubuntu/` | Secrets Manager에서 환경변수 로드 |
-| `download-source.sh` | `/home/ubuntu/` | S3에서 최신 소스 다운로드 |
-| `start-slack-app.sh` | `/home/ubuntu/` | Slack App 컨테이너 시작 |
-| `start-scheduler.sh` | `/home/ubuntu/` | Scheduler 컨테이너 시작 |
-| `start-gov-funding.sh` | `/home/ubuntu/` | Gov-Funding 컨테이너 시작 |
-| `start-all.sh` | `/home/ubuntu/` | 전체 서비스 시작 |
-| `stop-all.sh` | `/home/ubuntu/` | 전체 서비스 중지 |
-
-### Step 3: 서비스 시작
-
-```bash
-# 전체 서비스 한번에 시작 (소스 다운로드 + 빌드 + 실행)
+# 5. 전체 서비스 시작
 /home/ubuntu/start-all.sh
+
+# 6. 상태 확인
+/home/ubuntu/status.sh
 ```
 
-또는 개별 서비스 시작:
+## Deployment
 
-```bash
-# 환경변수 로드 (개별 실행 시 필수)
-source /home/ubuntu/load-env.sh
+S3 기반 배포 파이프라인. 소스 코드를 zip으로 압축하여 S3에 업로드하고, EC2에서 다운로드하여 서비스를 재시작한다.
 
-# 개별 서비스 시작
-/home/ubuntu/start-slack-app.sh
-/home/ubuntu/start-scheduler.sh
-/home/ubuntu/start-gov-funding.sh
+### 배포 흐름
+
+```
+[로컬] deploy-to-s3.sh
+    ↓  zip 압축 → s3://slack-bots-prod-snapshots/source/slack-bots-source.zip
+    ↓  .env도 함께 업로드 (AES256 암호화)
+[EC2] download-source.sh
+    ↓  서비스 중지 → S3 다운로드 → 압축 해제 → .env 복원
+[EC2] setup-venvs.sh
+    ↓  uv로 4개 venv 재생성 (/home/ubuntu/venvs/)
+    ↓  Playwright chromium 재설치 (gov-funding)
+[EC2] restart-all.sh
+    ↓  systemctl restart (4개 서비스)
 ```
 
----
-
-## 업데이트 배포
-
-소스 코드 변경 후 재배포:
+### 배포 명령어
 
 ```bash
-# 1. 로컬: S3에 새 소스 업로드
+# 로컬에서 실행
 ./scripts/deploy-to-s3.sh
 
-# 2. EC2: 서비스 재시작
-/home/ubuntu/stop-all.sh
-/home/ubuntu/start-all.sh
+# EC2에서 실행
+/home/ubuntu/download-source.sh
+/home/ubuntu/setup-venvs.sh
+/home/ubuntu/restart-all.sh
 ```
 
----
+### 포함 파일
 
-## 운영 명령어
+`deploy-to-s3.sh`는 다음 디렉토리/파일만 zip에 포함:
+- `src/` — 소스 코드
+- `scripts/` — 운영 스크립트
+- `docker/` — Dockerfile
+- `requirements*.txt` — 의존성 파일
+- `docker-compose.yml`
 
-### 상태 확인
+제외: `*.pyc`, `__pycache__`, `.git`, `.venv`, `.pytest_cache`
 
-```bash
-# 컨테이너 상태 확인
-docker ps
+## Configuration
 
-# 실시간 로그 확인
-docker logs -f slack-app
-docker logs -f scheduler
-docker logs -f gov-funding
+### 환경변수 (.env)
 
-# 스케줄러 파일 로그 확인
-tail -f /home/ubuntu/logs/*.log
-```
+| 변수 | 설명 | 기본값 |
+|------|------|--------|
+| `AWS_REGION` | AWS 리전 | `ap-northeast-2` |
+| `S3_BUCKET` | S3 버킷 (gov-funding 벡터) | `gov-funding-monitor` |
+| `AI_NEWS_S3_BUCKET` | S3 버킷 (ai-news 벡터) | S3_BUCKET과 동일 |
+| `BEDROCK_REGION` | Bedrock 리전 | `us-west-2` |
+| `BEDROCK_MODEL_ID` | Bedrock 모델 ID | `global.anthropic.claude-opus-4-6-v1` |
+| `EMBEDDING_MODEL_ID` | 임베딩 모델 ID | `amazon.titan-embed-text-v2:0` |
+| `SLACK_BOT_TOKEN` | Slack Bot Token | (필수) |
+| `SLACK_APP_TOKEN` | Slack App Token (Socket Mode) | (필수) |
+| `SLACK_CHANNEL_ID` | gov-funding 알림 채널 | (필수) |
+| `GOV_FUNDING_CHANNEL_ID` | gov-funding Q&A 채널 | SLACK_CHANNEL_ID와 동일 |
+| `AI_NEWS_CHANNEL_ID` | AI 뉴스 알림/Q&A 채널 | (필수) |
+| `GMAIL_CREDENTIALS` | Gmail API credentials JSON | (선택) |
+| `EMAIL_RECIPIENTS` | 이메일 수신자 (콤마 구분) | (선택) |
+| `RELEVANCE_THRESHOLD` | Bedrock 관련성 임계값 | `0.6` |
+| `DEADLINE_ALERT_DAYS` | 마감 알림 기준일 | `7` |
+| `AI_NEWS_IMPORTANCE_THRESHOLD` | AI 뉴스 중요도 임계값 | `0.5` |
+| `AI_NEWS_MAX_PER_SOURCE` | 소스별 최대 기사 수 | `20` |
+| `CLAUDE_CODE_USE_BEDROCK` | Claude Code Bedrock 사용 | `1` |
+| `AWS_BEARER_TOKEN_BEDROCK` | Bedrock Bearer Token | (필수) |
+| `ANTHROPIC_API_PROVIDER` | API 프로바이더 | `bedrock` |
+| `ANTHROPIC_SMALL_FAST_MODEL` | 빠른 모델 ID | (선택) |
 
-### 서비스 재시작
-
-```bash
-# 전체 재시작
-/home/ubuntu/stop-all.sh
-/home/ubuntu/start-all.sh
-
-# 개별 재시작
-docker restart slack-app
-docker restart scheduler
-docker restart gov-funding
-```
-
-### 서비스 중지
-
-```bash
-# 전체 중지
-/home/ubuntu/stop-all.sh
-
-# 개별 중지
-docker stop slack-app
-docker stop scheduler
-docker stop gov-funding
-```
-
-### 컨테이너 정리
-
-```bash
-# 중지된 컨테이너 삭제
-docker container prune -f
-
-# 사용하지 않는 이미지 삭제
-docker image prune -f
-
-# 전체 정리 (주의: 모든 미사용 리소스 삭제)
-docker system prune -f
-```
-
----
-
-## 프로젝트 구조
+## Directory Structure
 
 ```
 slack-bots/
 ├── src/
-│   ├── slack_app/               # Slack App (Socket Mode)
-│   │   └── app.py
-│   ├── scheduler/               # 업무 자동화 스케줄러
-│   │   └── scheduler.py
-│   └── gov_funding/             # 정부 지원사업 모니터링
-│       ├── main.py              # APScheduler 기반 메인
-│       ├── crawlers/            # K-Startup, Bizinfo 크롤러
-│       ├── analyzers/           # Bedrock AI 필터링
-│       ├── notifiers/           # Slack, Gmail 알림
-│       ├── storage/             # S3 스냅샷 저장
-│       └── utils/
-├── docker/
-│   ├── slack-app/
-│   │   └── Dockerfile
-│   ├── scheduler/
-│   │   └── Dockerfile
-│   └── gov-funding/
-│       └── Dockerfile
+│   ├── gov_funding/
+│   │   ├── main.py               # 워크플로우 (APScheduler, 매일 9시)
+│   │   ├── crawlers/
+│   │   │   ├── base_crawler.py    # ABC: crawl(), get_detail(), close()
+│   │   │   ├── bizinfo_crawler.py
+│   │   │   ├── nipa_crawler.py
+│   │   │   ├── nia_crawler.py
+│   │   │   ├── kstartup_crawler.py   # Playwright
+│   │   │   ├── iitp_crawler.py       # Playwright
+│   │   │   ├── msit_crawler.py       # Playwright
+│   │   │   ├── motie_crawler.py      # Playwright
+│   │   │   ├── jointips_crawler.py
+│   │   │   └── mss_crawler.py
+│   │   ├── analyzers/
+│   │   │   ├── bedrock_analyzer.py   # Claude 관련성 분석
+│   │   │   └── relevance_filter.py   # 키워드/마감일 필터
+│   │   ├── notifiers/
+│   │   │   ├── slack_notifier.py
+│   │   │   └── gmail_notifier.py
+│   │   ├── storage/
+│   │   │   ├── models.py            # Source enum, Announcement, NotificationPayload
+│   │   │   ├── vector_storage.py    # S3 Vectors (임베딩 저장/검색)
+│   │   │   └── s3_storage.py
+│   │   └── utils/
+│   │       ├── config.py            # Config, CRAWL_SOURCES, RELEVANCE_KEYWORDS
+│   │       ├── logger.py
+│   │       └── file_reader.py       # HWP/HWPX/PDF/DOCX 파일 파싱
+│   ├── ai_news/
+│   │   ├── main.py               # 워크플로우 (APScheduler, 월수금 8시)
+│   │   ├── crawlers/
+│   │   │   ├── base_crawler.py    # ABC: crawl(), close()
+│   │   │   ├── arxiv_crawler.py
+│   │   │   ├── hackernews_crawler.py
+│   │   │   ├── techcrunch_crawler.py
+│   │   │   ├── anthropic_crawler.py
+│   │   │   ├── openai_crawler.py
+│   │   │   ├── deepmind_crawler.py
+│   │   │   ├── huggingface_crawler.py
+│   │   │   ├── aitimes_crawler.py
+│   │   │   ├── itworld_crawler.py
+│   │   │   ├── etnews_crawler.py
+│   │   │   ├── itdaily_crawler.py
+│   │   │   ├── aws_blog_crawler.py
+│   │   │   ├── azure_blog_crawler.py
+│   │   │   ├── google_blog_crawler.py
+│   │   │   ├── ms_research_crawler.py
+│   │   │   ├── google_research_crawler.py
+│   │   │   └── medium_crawler.py
+│   │   ├── analyzers/
+│   │   │   └── bedrock_summarizer.py  # Claude 요약 및 중요도 평가
+│   │   ├── notifiers/
+│   │   │   └── slack_notifier.py
+│   │   ├── storage/
+│   │   │   ├── models.py            # ArticleSource enum, Article, NewsDigest
+│   │   │   └── vector_storage.py
+│   │   └── utils/
+│   │       ├── config.py            # Config, AI_KEYWORDS, CRAWL_SOURCES
+│   │       └── logger.py
+│   ├── slack_app/
+│   │   └── app.py                # Socket Mode 봇 (Claude CLI subprocess)
+│   └── scheduler/
+│       └── scheduler.py          # 워크플로우 자동화 (Claude CLI subprocess)
 ├── scripts/
-│   ├── deploy-to-s3.sh          # S3 배포 스크립트
-│   └── ec2-setup.sh             # EC2 초기 설정
-├── docker-compose.yml           # 로컬 개발용
-├── requirements.txt
-├── requirements-slack-app.txt
-└── requirements-gov-funding.txt
+│   ├── ec2-setup.sh              # EC2 초기 설정 (sudo 실행)
+│   ├── deploy-to-s3.sh           # 소스 → S3 업로드
+│   ├── download-source.sh        # S3 → EC2 다운로드
+│   ├── setup-venvs.sh            # uv로 4개 venv 생성
+│   ├── start-all.sh              # 전체 서비스 시작
+│   ├── stop-all.sh               # 전체 서비스 중지
+│   ├── restart-all.sh            # 전체 서비스 재시작
+│   ├── status.sh                 # 서비스 상태 확인
+│   ├── logs.sh                   # journalctl 로그 확인
+│   ├── start-slack-app.sh
+│   ├── start-scheduler.sh
+│   ├── start-gov-funding.sh
+│   ├── start-ai-news.sh
+│   ├── test_bedrock.py           # Bedrock 분석 테스트
+│   ├── test_slack.py             # Slack 알림 테스트
+│   ├── local_test.py             # 로컬 테스트
+│   └── build_playwright_layer.sh # Lambda Playwright 레이어 빌드
+├── docker/
+│   └── ai-news/                  # AI News Docker 설정
+├── requirements.txt              # 공통 의존성
+├── requirements-gov-funding.txt  # gov-funding 의존성
+├── requirements-ai-news.txt      # ai-news 의존성
+├── requirements-slack-app.txt    # slack-app 의존성
+├── docker-compose.yml
+├── .env                          # 환경변수 (커밋 금지)
+├── CLAUDE.md                     # Claude Code 프로젝트 메모리
+└── workspace/                    # Claude CLI 작업 디렉토리
 ```
 
----
+### Error Handling & Recovery
 
-## 환경변수
+서비스들은 캐스케이딩 폴백 패턴을 사용하여 개별 컴포넌트 장애 시에도 알림을 전송한다:
 
-### 공통
+- **Bedrock 분석 실패** → 키워드 필터 결과만 사용 (gov-funding)
+- **Bedrock 개별 분석 에러** → `relevance_score=0.5` 할당 (gov-funding)
+- **Vector 키 조회 실패** → 전체 기사를 신규로 처리 (ai-news)
+- **Bedrock 요약 실패** → 요약 없이 전송 (ai-news)
+- **벡터 저장 실패** → 모든 공고를 신규로 취급하여 알림 (gov-funding)
+- **크롤러 개별 실패** → 해당 소스 스킵, 나머지 계속 실행
 
-| 변수 | 설명 | 소스 |
-|------|------|------|
-| `SLACK_BOT_TOKEN` | Bot Token (xoxb-...) | Secrets Manager |
-| `SLACK_APP_TOKEN` | App Token (xapp-...) | Secrets Manager |
-| `AWS_DEFAULT_REGION` | AWS 리전 | 하드코딩 (ap-northeast-2) |
+### Deduplication
 
-### Gov-Funding
+- **gov-funding**: 소스 우선순위 기반 중복 제거 — `normalized_title` 비교, K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE 순서로 우선 유지
+- **ai-news**: 2-pass 중복 제거 — 1차 `normalized_title` 정확 일치, 2차 한국 뉴스 소스 간 `SequenceMatcher` 유사도 0.6 이상 제거 (aitimes, itworld, etnews, itdaily)
 
-| 변수 | 설명 | 기본값 |
-|------|------|--------|
-| `S3_BUCKET` | 스냅샷 저장 버킷 | gov-funding-monitor-snapshots |
-| `SLACK_CHANNEL_ID` | 알림 채널 ID | - |
-| `GOV_FUNDING_CHANNEL_ID` | Gov-Funding Q&A 채널 ID | - |
-| `RELEVANCE_THRESHOLD` | AI 필터링 임계값 | 0.7 |
-| `DEADLINE_ALERT_DAYS` | 마감 임박 기준일 | 7 |
-
----
-
-## 트러블슈팅
-
-### Docker 권한 오류
+## Operations
 
 ```bash
-# docker 그룹에 사용자 추가 후 재접속 필요
-sudo usermod -aG docker $USER
-exit
-# 재접속
-```
-
-### Secrets Manager 접근 오류
-
-```bash
-# IAM Role 권한 확인
-aws sts get-caller-identity
-
-# Secret 접근 테스트
-aws secretsmanager get-secret-value \
-    --secret-id slack-bots/slack-bot-token \
-    --region ap-northeast-2
-```
-
-### S3 다운로드 실패 (403 Forbidden)
-
-```bash
-# IAM Role에 S3 권한 확인
-aws s3 ls s3://slack-bots-prod-snapshots/ --region ap-northeast-2
-
-# 권한이 없으면 IAM Role에 S3 정책 추가 필요
-# terraform/modules/ec2/main.tf에 aws_iam_role_policy 추가
-```
-
-### 컨테이너 시작 실패
-
-```bash
-# 상세 로그 확인
-docker logs slack-app 2>&1 | tail -50
-
-# 컨테이너 내부 확인
-docker exec -it slack-app /bin/bash
-```
-
----
-
-## 보안 설계
-
-### 네트워크
-- **Private Subnet** 배치 권장 (인터넷 직접 노출 없음)
-- **NAT Gateway**를 통한 아웃바운드만 허용
-- **Security Group**: 아웃바운드 443만 허용, 인바운드 차단
-- **Socket Mode**: 인바운드 포트 불필요
-
-### 인증
-- **SSM Session Manager**: SSH 없이 EC2 관리 가능
-- **IMDSv2 강제**: 메타데이터 보안 강화
-- **Secrets Manager**: 토큰/키 안전 저장
-
-### 모니터링
-- **CloudWatch Logs**: 컨테이너 로그 수집
-- **VPC Flow Logs**: 네트워크 트래픽 모니터링
-
----
-
-## Gov-Funding 채널 Q&A
-
-Slack App은 Gov-Funding 채널(`GOV_FUNDING_CHANNEL_ID`)에서 봇을 멘션하면 S3에 저장된 최신 공고 스냅샷을 컨텍스트로 주입하여 공고 기반 답변을 제공합니다.
-
-### 동작 방식
-
-```
-사용자 @봇 멘션 → 채널 ID 확인 → S3 스냅샷 fetch (1시간 캐시) → 공고 컨텍스트 + 질문 → Claude CLI → 스레드 응답
-```
-
-- **대상 채널**: `GOV_FUNDING_CHANNEL_ID` 환경변수로 지정된 채널에서만 동작
-- **데이터 소스**: S3 버킷의 `snapshots/{kstartup,bizinfo,nipa}/` 경로에서 최신 스냅샷 로드
-- **캐시**: 1시간 TTL (데이터 없으면 5분 TTL)
-- **다른 채널**: 기존 일반 Claude CLI 응답 유지
-
-### 전제조건
-
-1. `GOV_FUNDING_CHANNEL_ID` 및 `S3_BUCKET` 환경변수 설정
-2. Gov-Funding 서비스가 최소 1회 실행되어 S3에 스냅샷이 존재해야 함
-
-### 사용 예시
-
-```
-@bot 마감 임박한 공고 알려줘
-@bot AI 관련 지원사업 있어?
-@bot 중소기업 대상 R&D 지원사업 요약해줘
-```
-
----
-
-## 로컬 개발
-
-```bash
-# 환경변수 설정
-export SLACK_BOT_TOKEN="xoxb-..."
-export SLACK_APP_TOKEN="xapp-..."
-
-# Docker Compose로 실행
-docker compose up -d
+# 상태 확인
+/home/ubuntu/status.sh
+systemctl status slack-app scheduler gov-funding ai-news
 
 # 로그 확인
-docker compose logs -f
+/home/ubuntu/logs.sh slack-app        # 실시간 로그
+journalctl -u gov-funding --since today  # 오늘 로그
+journalctl -u ai-news -n 100            # 최근 100줄
 
-# 종료
-docker compose down
+# 재시작
+/home/ubuntu/restart-all.sh
+sudo systemctl restart gov-funding     # 개별 재시작
+
+# 중지
+/home/ubuntu/stop-all.sh
+sudo systemctl stop scheduler          # 개별 중지
 ```
 
----
+## Code Conventions
 
-## 라이선스
+- **Python 3.13**, 한국어 docstring 및 로그 메시지
+- Pydantic `BaseModel`로 데이터 모델 정의 (`Announcement`, `Article`, `NotificationPayload`, `NewsDigest`)
+- `str` Enum으로 소스 정의 (`Source`, `ArticleSource`)
+- async/await 크롤러 패턴 (`BaseCrawler` ABC 상속)
+- **uv 기반 가상환경 관리** — pip/venv 직접 사용 금지, 반드시 `uv venv` / `uv pip install` 사용
+- **단위 테스트 필수** — 코드 변경 시 반드시 관련 테스트 작성 및 실행
+- `.env`로 환경변수 관리 (절대 커밋하지 않음)
 
-Searchdoc Internal Use
-
+## Development
+
+### Key Patterns
+
+#### BaseCrawler ABC (gov-funding)
+```python
+class BaseCrawler(ABC):
+    source: Source
+    name: str
+    async def crawl(self, max_items: int = 50) -> list[Announcement]  # 추상
+    async def get_detail(self, announcement_id: str) -> Optional[dict]  # 추상
+    async def close(self)  # 리소스 정리
+```
+
+#### BaseCrawler ABC (ai-news)
+```python
+class BaseCrawler(ABC):
+    source: ArticleSource
+    name: str
+    async def crawl(self, max_items: int = 20) -> list[Article]  # 추상
+    async def close(self)  # 리소스 정리
+```
+
+#### Playwright 크롤러 (optional import)
+```python
+try:
+    from .crawlers import KStartupCrawler
+    KSTARTUP_AVAILABLE = True
+except ImportError:
+    KSTARTUP_AVAILABLE = False
+```
+KStartup, IITP, MSIT, MOTIE 크롤러가 Playwright 의존. 없으면 자동 스킵.
+
+#### 워크플로우 파이프라인
+- **gov-funding**: crawl → deduplicate → deadline_filter(2개월) → keyword_filter → bedrock_filter(Claude) → S3 Vectors 비교 → Slack/Gmail 알림
+- **ai-news**: crawl → deduplicate(제목 유사도) → S3 Vectors 신규 식별 → bedrock_summarize(중요도 평가) → vector storage → Slack 알림
+
+### Dependencies
+
+| 서비스 | 주요 패키지 | 용도 |
+|--------|------------|------|
+| 공통 | pydantic, requests, beautifulsoup4, lxml, boto3 | 모델, HTTP, HTML 파싱, AWS |
+| gov-funding | playwright, apscheduler, olefile, google-api-python-client | 동적 크롤링, 스케줄, HWP 파싱, Gmail |
+| ai-news | feedparser, slack_sdk, apscheduler | RSS 파싱, Slack API, 스케줄 |
+| slack-app | slack-bolt, slack-sdk, python-dotenv, boto3 | Slack Socket Mode, 환경변수, AWS |
+| 테스트 | pytest, pytest-asyncio, moto | 테스트 프레임워크, async 테스트, AWS 모킹 |
+
+### 새 크롤러 추가 (gov-funding)
+
+1. `src/gov_funding/storage/models.py`의 `Source` enum에 값 추가
+2. `src/gov_funding/utils/config.py`의 `CRAWL_SOURCES`에 사이트 정보 추가
+3. `src/gov_funding/crawlers/{name}_crawler.py` 생성 — `BaseCrawler` 상속
+4. `crawl()`, `get_detail()`, `close()` 구현
+5. `src/gov_funding/crawlers/__init__.py`에 export
+6. `src/gov_funding/main.py`에 통합 (Playwright 의존 시 `try/except ImportError`)
+7. 테스트 작성 및 실행
+
+### 새 크롤러 추가 (ai-news)
+
+1. `src/ai_news/storage/models.py`의 `ArticleSource` enum에 값 추가
+2. `SOURCE_CATEGORY_MAP`에 카테고리 매핑 추가
+3. `src/ai_news/utils/config.py`의 `CRAWL_SOURCES`에 소스 URL 추가
+4. `src/ai_news/crawlers/{name}_crawler.py` 생성 — `BaseCrawler` 상속
+5. `crawl()`, `close()` 구현
+6. `src/ai_news/crawlers/__init__.py`에 export
+7. `src/ai_news/main.py`에 통합 후 테스트
+
+### 테스트 실행
+
+```bash
+# venv 활성화 후 pytest 실행
+source /home/ubuntu/venvs/gov-funding/bin/activate && python -m pytest
+source /home/ubuntu/venvs/ai-news/bin/activate && python -m pytest
+
+# 개별 테스트
+python scripts/test_bedrock.py
+python scripts/test_slack.py
+```
+
+## Systemd Services
+
+서비스 파일 위치: `/etc/systemd/system/`
+
+### 공통 설정
+
+```ini
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/slack-bots
+EnvironmentFile=/home/ubuntu/slack-bots/.env
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+```
+
+### 서비스별 실행 명령
+
+| 서비스 | ExecStart |
+|--------|-----------|
+| slack-app | `/home/ubuntu/venvs/slack-app/bin/python -m src.slack_app.app` |
+| scheduler | `/home/ubuntu/venvs/scheduler/bin/python -m src.scheduler.scheduler` |
+| gov-funding | `/home/ubuntu/venvs/gov-funding/bin/python -m src.gov_funding.main` |
+| ai-news | `/home/ubuntu/venvs/ai-news/bin/python -m src.ai_news.main` |
+
+### daemon-reload
+
+systemd 서비스 파일을 수정한 후:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart <service>
+```

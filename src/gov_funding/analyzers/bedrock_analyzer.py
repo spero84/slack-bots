@@ -1,12 +1,16 @@
 """Bedrock Claude 기반 관련성 분석"""
 import json
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import boto3
 from botocore.exceptions import ClientError
 
 from ..storage import Announcement
 from ..utils import get_config, logger
+from ..utils.file_reader import extract_text_from_file
+
+if TYPE_CHECKING:
+    from ..crawlers.base_crawler import BaseCrawler
 
 
 class BedrockAnalyzer:
@@ -118,15 +122,70 @@ class BedrockAnalyzer:
         return 0.5, None
 
 
+async def _fetch_detail_content(
+    crawler: "BaseCrawler",
+    announcement: Announcement,
+) -> Optional[str]:
+    """크롤러를 통해 공고 상세 내용 및 첨부파일(HWP/HWPX/PDF/DOCX) 텍스트를 수집
+
+    Args:
+        crawler: 해당 소스의 크롤러 인스턴스
+        announcement: 공고 정보
+
+    Returns:
+        상세 내용 텍스트 또는 None
+    """
+    try:
+        detail = await crawler.get_detail(announcement.id)
+        if not detail:
+            return None
+
+        parts = []
+
+        # 페이지 본문 텍스트
+        content = detail.get("content", "")
+        if content:
+            parts.append(content)
+
+        # 첨부파일 텍스트 추출 (첫 번째 지원 파일만)
+        attachments = detail.get("attachments", [])
+        for att in attachments:
+            name = att.get("name", "")
+            url = att.get("url", "")
+            if not name or not url:
+                continue
+
+            ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
+            if ext not in ("hwp", "hwpx", "pdf", "docx"):
+                continue
+
+            logger.info(f"첨부파일 다운로드: {name}")
+            file_bytes = await crawler.download_attachment(url)
+            if file_bytes:
+                file_text = extract_text_from_file(file_bytes, name)
+                if file_text:
+                    parts.append(file_text)
+                    logger.info(f"텍스트 추출 완료: {name} ({len(file_text)}자)")
+            break  # 첫 번째 지원 파일만 처리
+
+        return "\n\n".join(parts) if parts else None
+
+    except Exception as e:
+        logger.warning(f"상세 내용 수집 실패 ({announcement.title}): {e}")
+        return None
+
+
 async def filter_with_bedrock(
     announcements: list[Announcement],
     threshold: float = 0.7,
+    crawlers: Optional[dict[str, "BaseCrawler"]] = None,
 ) -> list[Announcement]:
     """Bedrock을 이용한 2차 필터링
 
     Args:
         announcements: 1차 필터링된 공고 목록
         threshold: 관련성 임계값
+        crawlers: 소스별 크롤러 인스턴스 dict (상세 내용 수집용)
 
     Returns:
         필터링 및 점수 부여된 공고 목록
@@ -135,7 +194,14 @@ async def filter_with_bedrock(
     filtered = []
 
     for ann in announcements:
-        score, summary = await analyzer.analyze_relevance(ann)
+        # 크롤러가 제공된 소스는 상세 내용 수집
+        detail_content = None
+        if crawlers and ann.source.value in crawlers:
+            detail_content = await _fetch_detail_content(
+                crawlers[ann.source.value], ann
+            )
+
+        score, summary = await analyzer.analyze_relevance(ann, detail_content)
         ann.relevance_score = score
         ann.summary = summary
 

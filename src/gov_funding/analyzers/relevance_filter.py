@@ -1,8 +1,59 @@
 """키워드 기반 관련성 필터링"""
 import re
+from datetime import datetime, timedelta
 
 from ..storage import Announcement
-from ..utils import EXCLUDE_KEYWORDS, RELEVANCE_KEYWORDS, ALLOWED_REGIONS, EXCLUDE_REGIONS, logger
+from ..utils import EXCLUDE_KEYWORDS, RELEVANCE_KEYWORDS, ALLOWED_REGIONS, EXCLUDE_REGIONS, get_config, logger
+
+
+def deadline_filter(announcements: list[Announcement]) -> list[Announcement]:
+    """마감일 기반 필터링 - 2개월 이내 공고만 포함
+
+    Bedrock 비용 절감을 위해 마감일이 너무 먼 공고를 제외.
+    마감일 정보가 없는 경우 공고 게시일(posted_date)로 판단.
+    둘 다 없는 경우 포함.
+
+    Args:
+        announcements: 공고 목록
+
+    Returns:
+        필터링된 공고 목록
+    """
+    config = get_config()
+    max_days = config.deadline_max_days
+    now = datetime.now()
+    future_cutoff = now + timedelta(days=max_days)
+    past_cutoff = now - timedelta(days=max_days)
+
+    filtered = []
+    excluded_past = 0
+    excluded_too_far = 0
+    excluded_old_posted = 0
+
+    for ann in announcements:
+        if ann.deadline is not None:
+            if ann.deadline < now:
+                excluded_past += 1
+                logger.debug(f"제외 (마감): {ann.title} (마감일: {ann.deadline.strftime('%Y-%m-%d')})")
+                continue
+            if ann.deadline > future_cutoff:
+                excluded_too_far += 1
+                logger.debug(f"제외 (마감 {max_days}일 초과): {ann.title} (마감일: {ann.deadline.strftime('%Y-%m-%d')})")
+                continue
+        elif ann.posted_date is not None:
+            if ann.posted_date < past_cutoff:
+                excluded_old_posted += 1
+                logger.debug(f"제외 (공고일 {max_days}일 초과): {ann.title} (공고일: {ann.posted_date.strftime('%Y-%m-%d')})")
+                continue
+
+        filtered.append(ann)
+
+    logger.info(
+        f"마감일 필터링: {len(announcements)}건 → {len(filtered)}건 "
+        f"(마감 {excluded_past}건, {max_days}일 초과 {excluded_too_far}건, "
+        f"공고일 초과 {excluded_old_posted}건 제외)"
+    )
+    return filtered
 
 
 def keyword_filter(announcements: list[Announcement]) -> list[Announcement]:

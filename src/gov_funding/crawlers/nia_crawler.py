@@ -6,6 +6,7 @@
 """
 import hashlib
 import re
+from datetime import datetime
 from typing import Optional
 
 import requests
@@ -155,6 +156,18 @@ class NiaCrawler(BaseCrawler):
         if not title:
             return None
 
+        # 게시일 추출 (span.date)
+        posted_date = None
+        date_span = link.find("span", class_="date")
+        if date_span:
+            date_text = date_span.get_text(strip=True)
+            for fmt in ("%Y.%m.%d", "%Y-%m-%d"):
+                try:
+                    posted_date = datetime.strptime(date_text, fmt)
+                    break
+                except ValueError:
+                    continue
+
         # 부서명 추출 (span 중 마지막 의미있는 텍스트)
         organization = None
         spans = link.find_all("span")
@@ -181,6 +194,7 @@ class NiaCrawler(BaseCrawler):
             department="한국지능정보사회진흥원",
             organization=organization or "NIA",
             url=url,
+            posted_date=posted_date,
         )
 
     async def get_detail(self, announcement_id: str) -> Optional[dict]:

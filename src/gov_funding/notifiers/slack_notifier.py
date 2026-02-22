@@ -16,6 +16,10 @@ SOURCE_DISPLAY_NAMES = {
     "nipa": "NIPA",
     "nia": "NIA",
     "iitp": "IITP",
+    "jointips": "JOINTIPS",
+    "msit": "과기정통부",
+    "mss": "중기부",
+    "motie": "산업부",
 }
 
 
@@ -192,7 +196,7 @@ class SlackNotifier:
             "type": "context",
             "elements": [{
                 "type": "mrkdwn",
-                "text": "🤖 Gov Funding Monitor | K-Startup, 기업마당, NIPA, NIA, IITP에서 수집",
+                "text": "🤖 Gov Funding Monitor | K-Startup, 기업마당, NIPA, NIA, IITP, JOINTIPS, 과기정통부, 중기부, 산업부에서 수집",
             }],
         })
 
@@ -215,7 +219,7 @@ class SlackNotifier:
             "type": "context",
             "elements": [{
                 "type": "mrkdwn",
-                "text": "🤖 Gov Funding Monitor | K-Startup, 기업마당, NIPA, NIA, IITP에서 수집",
+                "text": "🤖 Gov Funding Monitor | K-Startup, 기업마당, NIPA, NIA, IITP, JOINTIPS, 과기정통부, 중기부, 산업부에서 수집",
             }],
         })
         return blocks

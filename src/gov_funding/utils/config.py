@@ -25,6 +25,7 @@ class Config:
     # Filtering
     relevance_threshold: float = field(default_factory=lambda: float(os.environ.get("RELEVANCE_THRESHOLD", "0.6")))
     deadline_alert_days: int = field(default_factory=lambda: int(os.environ.get("DEADLINE_ALERT_DAYS", "7")))
+    deadline_max_days: int = field(default_factory=lambda: int(os.environ.get("DEADLINE_MAX_DAYS", "61")))
 
     # Bedrock (us-west-2 리전 사용)
     bedrock_region: str = field(default_factory=lambda: os.environ.get("BEDROCK_REGION", "us-west-2"))
@@ -122,6 +123,30 @@ CRAWL_SOURCES = {
         "base_url": "https://www.iitp.kr",
         "list_url": "https://www.iitp.kr/web/lay1/program/S1T44C51/iris/list.do",
         "detail_url_template": "https://www.iitp.kr/web/lay1/program/S1T44C51/iris/view.do?seq={id}",
+    },
+    "jointips": {
+        "name": "JOINTIPS",
+        "base_url": "https://www.jointips.or.kr",
+        "detail_url_template": "https://www.jointips.or.kr/bbs/board.php?bo_table=event&wr_id={id}",
+        "start_wr_id": 2000,
+    },
+    "msit": {
+        "name": "과학기술정보통신부",
+        "base_url": "https://www.msit.go.kr",
+        "list_url": "https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=121&mId=311",
+        "detail_url_template": "https://www.msit.go.kr/bbs/view.do?sCode=user&mPid=121&mId=311&nttSeqNo={id}",
+    },
+    "mss": {
+        "name": "중소벤처기업부",
+        "base_url": "https://www.mss.go.kr",
+        "list_url": "https://www.mss.go.kr/site/smba/ex/bbs/List.do?cbIdx=310",
+        "detail_url_template": "https://www.mss.go.kr/site/smba/ex/bbs/View.do?cbIdx=310&bcIdx={bcIdx}&parentSeq={parentSeq}",
+    },
+    "motie": {
+        "name": "산업통상자원부",
+        "base_url": "https://www.motie.go.kr",
+        "list_url": "https://www.motie.go.kr/kor/article/ATCL2826a2625",
+        "detail_base": "https://www.motir.go.kr",
     },
 }
 

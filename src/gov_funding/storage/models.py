@@ -13,6 +13,10 @@ class Source(str, Enum):
     NIPA = "nipa"
     NIA = "nia"
     IITP = "iitp"
+    JOINTIPS = "jointips"
+    MSIT = "msit"
+    MSS = "mss"
+    MOTIE = "motie"
 
 
 class ChangeType(str, Enum):
@@ -35,6 +39,7 @@ class Announcement(BaseModel):
     department: Optional[str] = Field(default=None, description="소관부처")
     organization: Optional[str] = Field(default=None, description="주관기관")
     url: str = Field(description="상세 페이지 URL")
+    posted_date: Optional[datetime] = Field(default=None, description="공고 게시일")
     summary: Optional[str] = Field(default=None, description="AI 요약")
     relevance_score: Optional[float] = Field(default=None, description="관련성 점수 (0-1)")
     crawled_at: datetime = Field(default_factory=datetime.now, description="크롤링 시각")

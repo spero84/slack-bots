@@ -12,8 +12,8 @@ from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from .analyzers import filter_with_bedrock, keyword_filter
-from .crawlers import BizinfoCrawler, NipaCrawler, NiaCrawler
+from .analyzers import deadline_filter, filter_with_bedrock, keyword_filter
+from .crawlers import BizinfoCrawler, NipaCrawler, NiaCrawler, JointipsCrawler, MssCrawler
 from .notifiers import send_gmail_notification, send_slack_notification
 from .storage import NotificationPayload, Source, deduplicate_announcements
 from .storage.vector_storage import S3VectorStorage
@@ -34,6 +34,20 @@ except ImportError:
     IITP_AVAILABLE = False
     logger.warning("Playwright not available - IITP crawling disabled")
 
+try:
+    from .crawlers import MsitCrawler
+    MSIT_AVAILABLE = True
+except ImportError:
+    MSIT_AVAILABLE = False
+    logger.warning("Playwright not available - MSIT crawling disabled")
+
+try:
+    from .crawlers import MotieCrawler
+    MOTIE_AVAILABLE = True
+except ImportError:
+    MOTIE_AVAILABLE = False
+    logger.warning("Playwright not available - MOTIE crawling disabled")
+
 # 스케줄러 로깅
 logging.basicConfig(
     level=logging.INFO,
@@ -45,7 +59,7 @@ scheduler_logger = logging.getLogger(__name__)
 async def run_workflow(force_resend: bool = False) -> dict:
     """메인 워크플로우 실행
 
-    1. K-Startup, 기업마당, NIPA, NIA, IITP에서 공고 크롤링
+    1. K-Startup, 기업마당, NIPA, NIA, IITP, JOINTIPS, MSIT, MSS, MOTIE에서 공고 크롤링
     2. 중복 제거 및 병합
     3. 키워드 + Bedrock 필터링
     4. S3 Vectors 비교로 신규/마감임박 식별
@@ -61,7 +75,10 @@ async def run_workflow(force_resend: bool = False) -> dict:
 
     result = {
         "timestamp": datetime.now().isoformat(),
-        "crawled": {"kstartup": 0, "bizinfo": 0, "nipa": 0, "nia": 0, "iitp": 0},
+        "crawled": {
+            "kstartup": 0, "bizinfo": 0, "nipa": 0, "nia": 0, "iitp": 0, "jointips": 0,
+            "msit": 0, "mss": 0, "motie": 0,
+        },
         "filtered": 0,
         "new_announcements": 0,
         "deadline_soon": 0,
@@ -75,12 +92,29 @@ async def run_workflow(force_resend: bool = False) -> dict:
     nipa_announcements = []
     nia_announcements = []
     iitp_announcements = []
+    jointips_announcements = []
+    msit_announcements = []
+    mss_announcements = []
+    motie_announcements = []
 
     bizinfo_crawler = BizinfoCrawler()
     nipa_crawler = NipaCrawler()
     nia_crawler = NiaCrawler()
+    jointips_crawler = JointipsCrawler()
+    mss_crawler = MssCrawler()
     kstartup_crawler = KStartupCrawler() if KSTARTUP_AVAILABLE else None
     iitp_crawler = IitpCrawler() if IITP_AVAILABLE else None
+    msit_crawler = MsitCrawler() if MSIT_AVAILABLE else None
+    motie_crawler = MotieCrawler() if MOTIE_AVAILABLE else None
+
+    # 크롤러 dict (Bedrock 분석 시 상세 내용 수집용 - MSIT, MSS, MOTIE만)
+    crawlers_map = {}
+    if msit_crawler:
+        crawlers_map["msit"] = msit_crawler
+    if mss_crawler:
+        crawlers_map["mss"] = mss_crawler
+    if motie_crawler:
+        crawlers_map["motie"] = motie_crawler
 
     try:
         # Bizinfo 크롤링 (항상 실행)
@@ -109,54 +143,96 @@ async def run_workflow(force_resend: bool = False) -> dict:
         else:
             logger.info("IITP 크롤링 스킵 (Playwright 미설치)")
 
+        # JOINTIPS 크롤링 (항상 실행)
+        jointips_announcements = await jointips_crawler.crawl(max_items=50)
+        result["crawled"]["jointips"] = len(jointips_announcements)
+
+        # MSIT 크롤링 (Playwright 사용 가능한 경우만)
+        if msit_crawler:
+            msit_announcements = await msit_crawler.crawl(max_items=50)
+            result["crawled"]["msit"] = len(msit_announcements)
+        else:
+            logger.info("MSIT 크롤링 스킵 (Playwright 미설치)")
+
+        # MSS 크롤링 (항상 실행)
+        mss_announcements = await mss_crawler.crawl(max_items=50)
+        result["crawled"]["mss"] = len(mss_announcements)
+
+        # MOTIE 크롤링 (Playwright 사용 가능한 경우만)
+        if motie_crawler:
+            motie_announcements = await motie_crawler.crawl(max_items=50)
+            result["crawled"]["motie"] = len(motie_announcements)
+        else:
+            logger.info("MOTIE 크롤링 스킵 (Playwright 미설치)")
+
         logger.info(
             f"크롤링 완료 - K-Startup: {len(kstartup_announcements)}건, "
             f"Bizinfo: {len(bizinfo_announcements)}건, "
             f"NIPA: {len(nipa_announcements)}건, "
             f"NIA: {len(nia_announcements)}건, "
-            f"IITP: {len(iitp_announcements)}건"
+            f"IITP: {len(iitp_announcements)}건, "
+            f"JOINTIPS: {len(jointips_announcements)}건, "
+            f"MSIT: {len(msit_announcements)}건, "
+            f"MSS: {len(mss_announcements)}건, "
+            f"MOTIE: {len(motie_announcements)}건"
         )
+
+        if not any([kstartup_announcements, bizinfo_announcements, nipa_announcements,
+                    nia_announcements, iitp_announcements, jointips_announcements,
+                    msit_announcements, mss_announcements, motie_announcements]):
+            logger.warning("크롤링 결과 없음")
+            return result
+
+        # 2. 중복 제거 및 병합 (우선순위: K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE)
+        all_announcements = deduplicate_announcements(
+            kstartup_announcements,
+            bizinfo_announcements,
+            nipa_announcements,
+            nia_announcements,
+            iitp_announcements,
+            jointips_announcements,
+            msit_announcements,
+            mss_announcements,
+            motie_announcements,
+        )
+
+        # 2.5. 마감일 필터링 (2개월 이내만)
+        deadline_filtered = deadline_filter(all_announcements)
+
+        # 3. 키워드 필터링 (1차)
+        keyword_filtered = keyword_filter(deadline_filtered)
+
+        # 4. Bedrock 필터링 (2차) - 크롤러가 살아있는 상태에서 상세 내용 수집
+        try:
+            final_filtered = await filter_with_bedrock(
+                keyword_filtered,
+                threshold=config.relevance_threshold,
+                crawlers=crawlers_map,
+            )
+            result["filtered"] = len(final_filtered)
+        except Exception as e:
+            logger.error(f"Bedrock 필터링 오류: {e}")
+            result["errors"].append(f"Bedrock filtering error: {str(e)}")
+            final_filtered = keyword_filtered  # Bedrock 실패 시 키워드 필터 결과 사용
 
     except Exception as e:
         logger.error(f"크롤링 오류: {e}")
         result["errors"].append(f"Crawling error: {str(e)}")
+        return result
     finally:
         await bizinfo_crawler.close()
         await nipa_crawler.close()
         await nia_crawler.close()
+        await jointips_crawler.close()
+        await mss_crawler.close()
         if kstartup_crawler:
             await kstartup_crawler.close()
         if iitp_crawler:
             await iitp_crawler.close()
-
-    if not any([kstartup_announcements, bizinfo_announcements, nipa_announcements,
-                nia_announcements, iitp_announcements]):
-        logger.warning("크롤링 결과 없음")
-        return result
-
-    # 2. 중복 제거 및 병합 (우선순위: K-Startup > Bizinfo > NIPA > NIA > IITP)
-    all_announcements = deduplicate_announcements(
-        kstartup_announcements,
-        bizinfo_announcements,
-        nipa_announcements,
-        nia_announcements,
-        iitp_announcements,
-    )
-
-    # 3. 키워드 필터링 (1차)
-    keyword_filtered = keyword_filter(all_announcements)
-
-    # 4. Bedrock 필터링 (2차)
-    try:
-        final_filtered = await filter_with_bedrock(
-            keyword_filtered,
-            threshold=config.relevance_threshold,
-        )
-        result["filtered"] = len(final_filtered)
-    except Exception as e:
-        logger.error(f"Bedrock 필터링 오류: {e}")
-        result["errors"].append(f"Bedrock filtering error: {str(e)}")
-        final_filtered = keyword_filtered  # Bedrock 실패 시 키워드 필터 결과 사용
+        if msit_crawler:
+            await msit_crawler.close()
+        if motie_crawler:
+            await motie_crawler.close()
 
     # 5. S3 Vectors 비교 (신규/마감임박 식별)
     combined_payload = NotificationPayload()
