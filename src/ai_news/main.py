@@ -50,7 +50,7 @@ scheduler_logger = logging.getLogger(__name__)
 KOREAN_SOURCES = {"aitimes", "itworld", "etnews", "itdaily"}
 
 
-def _is_similar(title1: str, title2: str, threshold: float = 0.6) -> bool:
+def _is_similar(title1: str, title2: str, threshold: float = 0.7) -> bool:
     """두 정규화된 제목의 유사도가 임계값 이상인지 확인"""
     return SequenceMatcher(None, title1, title2).ratio() >= threshold
 
@@ -59,7 +59,7 @@ def deduplicate_articles(articles: list[Article]) -> list[Article]:
     """제목 기반 중복 제거
 
     1차: 정규화 제목 정확 일치 제거
-    2차: 한국 뉴스 소스 간 유사 제목 제거 (SequenceMatcher 0.6 이상)
+    2차: 한국 뉴스 소스 간 유사 제목 제거 (SequenceMatcher 0.7 이상)
     """
     # 1차: 정확 일치 중복 제거
     seen: set[str] = set()
