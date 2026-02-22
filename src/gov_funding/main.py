@@ -107,6 +107,15 @@ async def run_workflow(force_resend: bool = False) -> dict:
     msit_crawler = MsitCrawler() if MSIT_AVAILABLE else None
     motie_crawler = MotieCrawler() if MOTIE_AVAILABLE else None
 
+    # 크롤러 dict (Bedrock 분석 시 상세 내용 수집용 - MSIT, MSS, MOTIE만)
+    crawlers_map = {}
+    if msit_crawler:
+        crawlers_map["msit"] = msit_crawler
+    if mss_crawler:
+        crawlers_map["mss"] = mss_crawler
+    if motie_crawler:
+        crawlers_map["motie"] = motie_crawler
+
     try:
         # Bizinfo 크롤링 (항상 실행)
         bizinfo_announcements = await bizinfo_crawler.crawl(max_items=50)
@@ -168,9 +177,48 @@ async def run_workflow(force_resend: bool = False) -> dict:
             f"MOTIE: {len(motie_announcements)}건"
         )
 
+        if not any([kstartup_announcements, bizinfo_announcements, nipa_announcements,
+                    nia_announcements, iitp_announcements, jointips_announcements,
+                    msit_announcements, mss_announcements, motie_announcements]):
+            logger.warning("크롤링 결과 없음")
+            return result
+
+        # 2. 중복 제거 및 병합 (우선순위: K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE)
+        all_announcements = deduplicate_announcements(
+            kstartup_announcements,
+            bizinfo_announcements,
+            nipa_announcements,
+            nia_announcements,
+            iitp_announcements,
+            jointips_announcements,
+            msit_announcements,
+            mss_announcements,
+            motie_announcements,
+        )
+
+        # 2.5. 마감일 필터링 (2개월 이내만)
+        deadline_filtered = deadline_filter(all_announcements)
+
+        # 3. 키워드 필터링 (1차)
+        keyword_filtered = keyword_filter(deadline_filtered)
+
+        # 4. Bedrock 필터링 (2차) - 크롤러가 살아있는 상태에서 상세 내용 수집
+        try:
+            final_filtered = await filter_with_bedrock(
+                keyword_filtered,
+                threshold=config.relevance_threshold,
+                crawlers=crawlers_map,
+            )
+            result["filtered"] = len(final_filtered)
+        except Exception as e:
+            logger.error(f"Bedrock 필터링 오류: {e}")
+            result["errors"].append(f"Bedrock filtering error: {str(e)}")
+            final_filtered = keyword_filtered  # Bedrock 실패 시 키워드 필터 결과 사용
+
     except Exception as e:
         logger.error(f"크롤링 오류: {e}")
         result["errors"].append(f"Crawling error: {str(e)}")
+        return result
     finally:
         await bizinfo_crawler.close()
         await nipa_crawler.close()
@@ -185,43 +233,6 @@ async def run_workflow(force_resend: bool = False) -> dict:
             await msit_crawler.close()
         if motie_crawler:
             await motie_crawler.close()
-
-    if not any([kstartup_announcements, bizinfo_announcements, nipa_announcements,
-                nia_announcements, iitp_announcements, jointips_announcements,
-                msit_announcements, mss_announcements, motie_announcements]):
-        logger.warning("크롤링 결과 없음")
-        return result
-
-    # 2. 중복 제거 및 병합 (우선순위: K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE)
-    all_announcements = deduplicate_announcements(
-        kstartup_announcements,
-        bizinfo_announcements,
-        nipa_announcements,
-        nia_announcements,
-        iitp_announcements,
-        jointips_announcements,
-        msit_announcements,
-        mss_announcements,
-        motie_announcements,
-    )
-
-    # 2.5. 마감일 필터링 (2개월 이내만)
-    deadline_filtered = deadline_filter(all_announcements)
-
-    # 3. 키워드 필터링 (1차)
-    keyword_filtered = keyword_filter(deadline_filtered)
-
-    # 4. Bedrock 필터링 (2차)
-    try:
-        final_filtered = await filter_with_bedrock(
-            keyword_filtered,
-            threshold=config.relevance_threshold,
-        )
-        result["filtered"] = len(final_filtered)
-    except Exception as e:
-        logger.error(f"Bedrock 필터링 오류: {e}")
-        result["errors"].append(f"Bedrock filtering error: {str(e)}")
-        final_filtered = keyword_filtered  # Bedrock 실패 시 키워드 필터 결과 사용
 
     # 5. S3 Vectors 비교 (신규/마감임박 식별)
     combined_payload = NotificationPayload()
