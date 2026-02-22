@@ -302,10 +302,10 @@ class MotieCrawler(BaseCrawler):
             )
             content = await content_elem.inner_text() if content_elem else ""
 
-            # 첨부파일 목록 (HWP 파일 직접 다운로드 링크)
+            # 첨부파일 목록 (HWP 파일 직접 다운로드 링크, Download 대소문자 모두 매칭)
             attachments = []
             file_links = await page.query_selector_all(
-                "a[href*='/attach/down/'], a[href*='download'], "
+                "a[href*='/attach/down/'], a[href*='Download'], a[href*='download'], "
                 "a[href*='fileDown'], a.file_down, .file_list a, .attach a"
             )
             for link in file_links:

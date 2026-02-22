@@ -240,10 +240,11 @@ class MsitCrawler(BaseCrawler):
             )
             content = await content_elem.inner_text() if content_elem else ""
 
-            # 첨부파일 목록
+            # 첨부파일 목록 (Download 대소문자 모두 매칭)
             attachments = []
             file_links = await page.query_selector_all(
-                "a[href*='download'], a[href*='fileDown'], a.file_down, "
+                "a[href*='Download'], a[href*='download'], "
+                "a[href*='fileDown'], a.file_down, "
                 ".file_list a, .attach a"
             )
             for link in file_links:

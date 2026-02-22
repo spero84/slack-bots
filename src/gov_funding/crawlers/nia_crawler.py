@@ -215,20 +215,31 @@ class NiaCrawler(BaseCrawler):
 
                 # 상세 내용 추출
                 content_div = soup.select_one(
+                    "div.con_area, div.detail_type01, "
                     "div.view_cont, div.content, div.board_view, "
                     "div.bbs_view, div.bbsV_cont"
                 )
                 content = content_div.get_text(strip=True) if content_div else ""
 
-                if content:
-                    # 첨부파일 목록
-                    attachments = []
-                    for a in soup.select("a[href*='download'], a[href*='fileDown'], a.file_down"):
-                        attachments.append({
-                            "name": a.get_text(strip=True),
-                            "url": a.get("href", ""),
-                        })
+                # 첨부파일 목록 (Download.do 대소문자 모두 매칭)
+                attachments = []
+                for a in soup.select(
+                    "a[href*='Download'], a[href*='download'], "
+                    "a[href*='fileDown'], a.file_down"
+                ):
+                    name = a.get_text(strip=True)
+                    href = a.get("href", "")
+                    # "다운로드", "미리보기" 링크는 파일명 정리
+                    if name.endswith("-다운로드"):
+                        name = name[:-4]
+                    elif name.endswith("-미리보기"):
+                        continue
+                    if name and href:
+                        if not href.startswith("http"):
+                            href = self.config["base_url"] + href
+                        attachments.append({"name": name, "url": href})
 
+                if content or attachments:
                     return {
                         "content": content[:5000],
                         "attachments": attachments,

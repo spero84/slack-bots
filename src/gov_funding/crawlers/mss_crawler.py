@@ -209,7 +209,15 @@ class MssCrawler(BaseCrawler):
         )
 
     def _parse_item_tr(self, tr) -> Optional[Announcement]:
-        """<tr> 아이템 파싱 (테이블 구조 대체)"""
+        """<tr> 아이템 파싱 (테이블 구조)
+
+        MSS BBS 구조:
+        <tr onclick="doBbsFView('310','bcIdx','Gbn','parentSeq')">
+          <td>번호</td>
+          <td class="subject"><a href="#view">제목</a></td>
+          ...
+        </tr>
+        """
         cells = tr.find_all("td")
         if len(cells) < 3:
             return None
@@ -229,28 +237,74 @@ class MssCrawler(BaseCrawler):
         if not title:
             return None
 
-        # ID 추출
+        # ID 추출: <tr> 태그의 onclick에서 doBbsFView 추출
         ann_id = None
-        onclick = link.get("onclick", "")
-        href = link.get("href", "")
+        parentSeq = "0"
 
+        # <tr> onclick 우선 (현재 MSS 구조)
+        tr_onclick = tr.get("onclick", "")
         view_match = re.search(
             r"doBbsFView\s*\(\s*'?(\d+)'?\s*,\s*'?(\d+)'?\s*,\s*'?([^']*)'?\s*,\s*'?(\d+)'?\s*\)",
-            onclick
+            tr_onclick
         )
         if view_match:
             ann_id = view_match.group(2)
             parentSeq = view_match.group(4)
-        else:
+
+        # <a> onclick 폴백
+        if not ann_id:
+            link_onclick = link.get("onclick", "")
+            view_match = re.search(
+                r"doBbsFView\s*\(\s*'?(\d+)'?\s*,\s*'?(\d+)'?\s*,\s*'?([^']*)'?\s*,\s*'?(\d+)'?\s*\)",
+                link_onclick
+            )
+            if view_match:
+                ann_id = view_match.group(2)
+                parentSeq = view_match.group(4)
+
+        # href 폴백
+        if not ann_id:
+            href = link.get("href", "")
             bcIdx_match = re.search(r'bcIdx=(\d+)', href)
             if bcIdx_match:
                 ann_id = bcIdx_match.group(1)
-            parentSeq = "0"
 
         if not ann_id:
             ann_id = hashlib.md5(title.encode()).hexdigest()[:12]
 
-        # 날짜 추출 (보통 마지막 또는 마지막에서 2번째 셀)
+        # 카테고리 (공고번호 등)
+        category = None
+        cat_match = re.match(r'\[([^\]]+)\]\s*', title)
+        if cat_match:
+            category = cat_match.group(1)
+            title = title[cat_match.end():].strip()
+
+        # 신청기간에서 마감일 추출
+        deadline = None
+        d_day = None
+        full_text = tr.get_text()
+        period_match = re.search(
+            r'(\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})\s*~\s*(\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})',
+            full_text,
+        )
+        if period_match:
+            end_date_str = period_match.group(2).replace('.', '-').replace('/', '-')
+            try:
+                deadline = datetime.strptime(end_date_str, "%Y-%m-%d")
+                deadline = deadline.replace(hour=23, minute=59, second=59)
+                delta = (deadline - datetime.now()).days
+                d_day = delta if delta >= 0 else None
+            except ValueError:
+                pass
+
+        # 부서명 추출
+        organization = None
+        for span in tr.find_all("span"):
+            text = span.get_text(strip=True)
+            if re.search(r'(팀|부|실|센터|단|본부|처|국|과|TF)$', text):
+                organization = text
+
+        # 날짜 추출
         posted_date = None
         for cell in reversed(cells):
             date_text = cell.get_text(strip=True)
@@ -265,18 +319,18 @@ class MssCrawler(BaseCrawler):
 
         url = self.config["detail_url_template"].format(
             bcIdx=ann_id,
-            parentSeq=parentSeq if 'parentSeq' in dir() else "0",
+            parentSeq=parentSeq,
         )
 
         return Announcement(
             id=ann_id,
             source=self.source,
             title=title,
-            category=None,
-            deadline=None,
-            d_day=None,
+            category=category,
+            deadline=deadline,
+            d_day=d_day,
             department="중소벤처기업부",
-            organization="MSS",
+            organization=organization or "MSS",
             url=url,
             posted_date=posted_date,
         )
@@ -296,20 +350,37 @@ class MssCrawler(BaseCrawler):
 
             # 상세 내용 추출
             content_div = soup.select_one(
-                "div.view_cont, div.content, div.board_view, "
+                "div.board_view, div.view_cont, div.content, "
                 "div.bbs_view, div.bbsV_cont"
             )
             content = content_div.get_text(strip=True) if content_div else ""
 
-            # 첨부파일 목록
+            # 첨부파일 목록 (td.file_list 구조에서 파일명 + 다운로드 URL 추출)
             attachments = []
-            for a in soup.select("a[href*='download'], a[href*='fileDown'], a.file_down"):
-                name = a.get_text(strip=True)
-                href = a.get("href", "")
-                if name and href:
-                    if not href.startswith("http"):
+            for li in soup.select("td.file_list li"):
+                name_span = li.select_one("span.name")
+                down_link = li.select_one("a[href*='Download'], a[href*='download']")
+                if name_span and down_link:
+                    # span.name 텍스트에서 파일 크기 제거
+                    name = re.sub(r'\s*\[[\d.]+\s*[KMGT]?B\]', '', name_span.get_text(strip=True)).strip()
+                    href = down_link.get("href", "")
+                    if name and href:
+                        if not href.startswith("http"):
+                            href = self.config["base_url"] + href
+                        attachments.append({"name": name, "url": href})
+
+            # td.file_list가 없는 경우 폴백
+            if not attachments:
+                for a in soup.select(
+                    "a[href*='Download'], a[href*='download'], "
+                    "a[href*='fileDown'], a.file_down"
+                ):
+                    name = a.get_text(strip=True)
+                    href = a.get("href", "")
+                    if href and not href.startswith("http"):
                         href = self.config["base_url"] + href
-                    attachments.append({"name": name, "url": href})
+                    if name and href:
+                        attachments.append({"name": name, "url": href})
 
             return {
                 "content": content[:5000],

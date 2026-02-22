@@ -31,3 +31,8 @@ python-docx>=1.0.0
 # Utilities
 python-dateutil>=2.8.2
 pytz>=2024.1
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+moto>=5.0.0
