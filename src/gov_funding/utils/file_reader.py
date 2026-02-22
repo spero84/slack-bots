@@ -1,7 +1,10 @@
-"""HWP/HWPX 파일 텍스트 추출 유틸리티
+"""파일 텍스트 추출 유틸리티
 
+지원 형식:
 - HWP (바이너리): olefile로 OLE2 컨테이너 → BodyText/Section 스트림에서 zlib 압축 해제 → 텍스트 추출
 - HWPX (XML ZIP): zipfile로 압축 해제 → Contents/section*.xml에서 lxml로 텍스트 노드 추출
+- PDF: pdfplumber로 레이아웃 보존 텍스트 추출
+- DOCX: python-docx로 단락 및 테이블 텍스트 추출
 """
 import io
 import re
@@ -20,6 +23,20 @@ try:
 except ImportError:
     OLEFILE_AVAILABLE = False
     logger.warning("olefile not available - HWP binary parsing disabled")
+
+try:
+    import pdfplumber
+    PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    PDFPLUMBER_AVAILABLE = False
+    logger.warning("pdfplumber not available - PDF parsing disabled")
+
+try:
+    from docx import Document as DocxDocument
+    PYTHON_DOCX_AVAILABLE = True
+except ImportError:
+    PYTHON_DOCX_AVAILABLE = False
+    logger.warning("python-docx not available - DOCX parsing disabled")
 
 
 def extract_text_from_hwp(file_bytes: bytes) -> str:
@@ -266,6 +283,54 @@ def _parse_hwpx_section(xml_data: bytes) -> str:
     return text
 
 
+def extract_text_from_pdf(file_bytes: bytes) -> str:
+    """PDF에서 텍스트 추출 (pdfplumber 사용)
+
+    Args:
+        file_bytes: PDF 파일 바이트
+
+    Returns:
+        추출된 텍스트
+    """
+    if not PDFPLUMBER_AVAILABLE:
+        logger.error("pdfplumber not installed - cannot parse PDF")
+        return ""
+
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            parts = [page.extract_text() or "" for page in pdf.pages]
+        return "\n".join(parts).strip()
+    except Exception as e:
+        logger.error(f"PDF 텍스트 추출 오류: {e}")
+        return ""
+
+
+def extract_text_from_docx(file_bytes: bytes) -> str:
+    """DOCX에서 텍스트 추출 (python-docx 사용)
+
+    Args:
+        file_bytes: DOCX 파일 바이트
+
+    Returns:
+        추출된 텍스트
+    """
+    if not PYTHON_DOCX_AVAILABLE:
+        logger.error("python-docx not installed - cannot parse DOCX")
+        return ""
+
+    try:
+        doc = DocxDocument(io.BytesIO(file_bytes))
+        parts = [p.text for p in doc.paragraphs if p.text.strip()]
+        # 테이블 텍스트도 추출
+        for table in doc.tables:
+            for row in table.rows:
+                parts.append("\t".join(cell.text for cell in row.cells))
+        return "\n".join(parts).strip()
+    except Exception as e:
+        logger.error(f"DOCX 텍스트 추출 오류: {e}")
+        return ""
+
+
 def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
     """파일 확장자에 따라 적절한 텍스트 추출 함수 호출
 
@@ -282,6 +347,10 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
         return extract_text_from_hwpx(file_bytes)
     elif ext == "hwp":
         return extract_text_from_hwp(file_bytes)
+    elif ext == "pdf":
+        return extract_text_from_pdf(file_bytes)
+    elif ext == "docx":
+        return extract_text_from_docx(file_bytes)
     else:
         logger.warning(f"지원하지 않는 파일 형식: {filename}")
         return ""

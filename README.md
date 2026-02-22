@@ -205,7 +205,7 @@ slack-bots/
 │   │   └── utils/
 │   │       ├── config.py            # Config, CRAWL_SOURCES, RELEVANCE_KEYWORDS
 │   │       ├── logger.py
-│   │       └── hwp_reader.py        # HWP/HWPX 파일 파싱
+│   │       └── file_reader.py       # HWP/HWPX/PDF/DOCX 파일 파싱
 │   ├── ai_news/
 │   │   ├── main.py               # 워크플로우 (APScheduler, 월수금 8시)
 │   │   ├── crawlers/
@@ -271,6 +271,22 @@ slack-bots/
 └── workspace/                    # Claude CLI 작업 디렉토리
 ```
 
+### Error Handling & Recovery
+
+서비스들은 캐스케이딩 폴백 패턴을 사용하여 개별 컴포넌트 장애 시에도 알림을 전송한다:
+
+- **Bedrock 분석 실패** → 키워드 필터 결과만 사용 (gov-funding)
+- **Bedrock 개별 분석 에러** → `relevance_score=0.5` 할당 (gov-funding)
+- **Vector 키 조회 실패** → 전체 기사를 신규로 처리 (ai-news)
+- **Bedrock 요약 실패** → 요약 없이 전송 (ai-news)
+- **벡터 저장 실패** → 모든 공고를 신규로 취급하여 알림 (gov-funding)
+- **크롤러 개별 실패** → 해당 소스 스킵, 나머지 계속 실행
+
+### Deduplication
+
+- **gov-funding**: 소스 우선순위 기반 중복 제거 — `normalized_title` 비교, K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE 순서로 우선 유지
+- **ai-news**: 2-pass 중복 제거 — 1차 `normalized_title` 정확 일치, 2차 한국 뉴스 소스 간 `SequenceMatcher` 유사도 0.6 이상 제거 (aitimes, itworld, etnews, itdaily)
+
 ## Operations
 
 ```bash
@@ -292,7 +308,62 @@ sudo systemctl restart gov-funding     # 개별 재시작
 sudo systemctl stop scheduler          # 개별 중지
 ```
 
+## Code Conventions
+
+- **Python 3.13**, 한국어 docstring 및 로그 메시지
+- Pydantic `BaseModel`로 데이터 모델 정의 (`Announcement`, `Article`, `NotificationPayload`, `NewsDigest`)
+- `str` Enum으로 소스 정의 (`Source`, `ArticleSource`)
+- async/await 크롤러 패턴 (`BaseCrawler` ABC 상속)
+- **uv 기반 가상환경 관리** — pip/venv 직접 사용 금지, 반드시 `uv venv` / `uv pip install` 사용
+- **단위 테스트 필수** — 코드 변경 시 반드시 관련 테스트 작성 및 실행
+- `.env`로 환경변수 관리 (절대 커밋하지 않음)
+
 ## Development
+
+### Key Patterns
+
+#### BaseCrawler ABC (gov-funding)
+```python
+class BaseCrawler(ABC):
+    source: Source
+    name: str
+    async def crawl(self, max_items: int = 50) -> list[Announcement]  # 추상
+    async def get_detail(self, announcement_id: str) -> Optional[dict]  # 추상
+    async def close(self)  # 리소스 정리
+```
+
+#### BaseCrawler ABC (ai-news)
+```python
+class BaseCrawler(ABC):
+    source: ArticleSource
+    name: str
+    async def crawl(self, max_items: int = 20) -> list[Article]  # 추상
+    async def close(self)  # 리소스 정리
+```
+
+#### Playwright 크롤러 (optional import)
+```python
+try:
+    from .crawlers import KStartupCrawler
+    KSTARTUP_AVAILABLE = True
+except ImportError:
+    KSTARTUP_AVAILABLE = False
+```
+KStartup, IITP, MSIT, MOTIE 크롤러가 Playwright 의존. 없으면 자동 스킵.
+
+#### 워크플로우 파이프라인
+- **gov-funding**: crawl → deduplicate → deadline_filter(2개월) → keyword_filter → bedrock_filter(Claude) → S3 Vectors 비교 → Slack/Gmail 알림
+- **ai-news**: crawl → deduplicate(제목 유사도) → S3 Vectors 신규 식별 → bedrock_summarize(중요도 평가) → vector storage → Slack 알림
+
+### Dependencies
+
+| 서비스 | 주요 패키지 | 용도 |
+|--------|------------|------|
+| 공통 | pydantic, requests, beautifulsoup4, lxml, boto3 | 모델, HTTP, HTML 파싱, AWS |
+| gov-funding | playwright, apscheduler, olefile, google-api-python-client | 동적 크롤링, 스케줄, HWP 파싱, Gmail |
+| ai-news | feedparser, slack_sdk, apscheduler | RSS 파싱, Slack API, 스케줄 |
+| slack-app | slack-bolt, slack-sdk, python-dotenv, boto3 | Slack Socket Mode, 환경변수, AWS |
+| 테스트 | pytest, pytest-asyncio, moto | 테스트 프레임워크, async 테스트, AWS 모킹 |
 
 ### 새 크롤러 추가 (gov-funding)
 

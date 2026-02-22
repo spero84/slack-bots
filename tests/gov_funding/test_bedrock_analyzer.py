@@ -107,14 +107,14 @@ async def test_fetch_detail_content_with_hwpx_attachment():
 
 
 @pytest.mark.asyncio
-async def test_fetch_detail_content_skips_non_hwp():
-    """HWP/HWPX가 아닌 첨부파일은 무시"""
+async def test_fetch_detail_content_skips_unsupported():
+    """지원하지 않는 확장자의 첨부파일은 무시"""
     crawler = FakeCrawler(
         detail_result={
             "content": "본문",
             "attachments": [
-                {"name": "문서.pdf", "url": "https://example.com/file.pdf"},
                 {"name": "이미지.png", "url": "https://example.com/img.png"},
+                {"name": "압축.zip", "url": "https://example.com/file.zip"},
             ],
         },
     )
@@ -126,8 +126,56 @@ async def test_fetch_detail_content_skips_non_hwp():
 
 
 @pytest.mark.asyncio
-async def test_fetch_detail_content_only_first_hwp():
-    """HWP 파일이 여러 개일 때 첫 번째만 처리"""
+async def test_fetch_detail_content_with_pdf_attachment():
+    """PDF 첨부파일 텍스트 추출"""
+    crawler = FakeCrawler(
+        detail_result={
+            "content": "페이지 본문",
+            "attachments": [
+                {"name": "공고문.pdf", "url": "https://example.com/file.pdf"},
+            ],
+        },
+        download_result=b"fake-pdf-bytes",
+    )
+    ann = _make_announcement()
+
+    with patch(
+        "src.gov_funding.analyzers.bedrock_analyzer.extract_text_from_file",
+        return_value="PDF에서 추출한 텍스트",
+    ) as mock_extract:
+        result = await _fetch_detail_content(crawler, ann)
+
+    mock_extract.assert_called_once_with(b"fake-pdf-bytes", "공고문.pdf")
+    assert "페이지 본문" in result
+    assert "PDF에서 추출한 텍스트" in result
+
+
+@pytest.mark.asyncio
+async def test_fetch_detail_content_with_docx_attachment():
+    """DOCX 첨부파일 텍스트 추출"""
+    crawler = FakeCrawler(
+        detail_result={
+            "content": "",
+            "attachments": [
+                {"name": "공고문.docx", "url": "https://example.com/file.docx"},
+            ],
+        },
+        download_result=b"fake-docx-bytes",
+    )
+    ann = _make_announcement()
+
+    with patch(
+        "src.gov_funding.analyzers.bedrock_analyzer.extract_text_from_file",
+        return_value="DOCX 텍스트",
+    ):
+        result = await _fetch_detail_content(crawler, ann)
+
+    assert result == "DOCX 텍스트"
+
+
+@pytest.mark.asyncio
+async def test_fetch_detail_content_only_first_supported_file():
+    """지원 파일이 여러 개일 때 첫 번째만 처리"""
     call_count = 0
 
     class CountingCrawler(FakeCrawler):

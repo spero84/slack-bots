@@ -7,7 +7,7 @@ from botocore.exceptions import ClientError
 
 from ..storage import Announcement
 from ..utils import get_config, logger
-from ..utils.hwp_reader import extract_text_from_file
+from ..utils.file_reader import extract_text_from_file
 
 if TYPE_CHECKING:
     from ..crawlers.base_crawler import BaseCrawler
@@ -126,7 +126,7 @@ async def _fetch_detail_content(
     crawler: "BaseCrawler",
     announcement: Announcement,
 ) -> Optional[str]:
-    """크롤러를 통해 공고 상세 내용 및 HWP/HWPX 첨부파일 텍스트를 수집
+    """크롤러를 통해 공고 상세 내용 및 첨부파일(HWP/HWPX/PDF/DOCX) 텍스트를 수집
 
     Args:
         crawler: 해당 소스의 크롤러 인스턴스
@@ -147,7 +147,7 @@ async def _fetch_detail_content(
         if content:
             parts.append(content)
 
-        # HWP/HWPX 첨부파일 텍스트 추출 (첫 번째 파일만)
+        # 첨부파일 텍스트 추출 (첫 번째 지원 파일만)
         attachments = detail.get("attachments", [])
         for att in attachments:
             name = att.get("name", "")
@@ -156,17 +156,17 @@ async def _fetch_detail_content(
                 continue
 
             ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
-            if ext not in ("hwp", "hwpx"):
+            if ext not in ("hwp", "hwpx", "pdf", "docx"):
                 continue
 
-            logger.info(f"HWP 첨부파일 다운로드: {name}")
+            logger.info(f"첨부파일 다운로드: {name}")
             file_bytes = await crawler.download_attachment(url)
             if file_bytes:
-                hwp_text = extract_text_from_file(file_bytes, name)
-                if hwp_text:
-                    parts.append(hwp_text)
-                    logger.info(f"HWP 텍스트 추출 완료: {name} ({len(hwp_text)}자)")
-            break  # 첫 번째 HWP/HWPX만 처리
+                file_text = extract_text_from_file(file_bytes, name)
+                if file_text:
+                    parts.append(file_text)
+                    logger.info(f"텍스트 추출 완료: {name} ({len(file_text)}자)")
+            break  # 첫 번째 지원 파일만 처리
 
         return "\n\n".join(parts) if parts else None
 
