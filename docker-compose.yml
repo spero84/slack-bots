@@ -1,0 +1,58 @@
+# Docker Compose for Slack App + Scheduler + Gov Funding
+#
+# 사용법:
+#   source /home/ssm-user/load-env.sh
+#   docker compose up -d
+#   docker compose logs -f
+#   docker compose down
+
+services:
+  slack-app:
+    build:
+      context: .
+      dockerfile: docker/slack-app/Dockerfile
+    container_name: slack-app
+    restart: always
+    environment:
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
+      - AWS_DEFAULT_REGION=ap-northeast-2
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: docker/scheduler/Dockerfile
+    container_name: scheduler
+    restart: always
+    environment:
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
+      - AWS_DEFAULT_REGION=ap-northeast-2
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - slack-app
+
+  gov-funding:
+    build:
+      context: .
+      dockerfile: docker/gov-funding/Dockerfile
+    container_name: gov-funding
+    restart: always
+    environment:
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - AWS_DEFAULT_REGION=ap-northeast-2
+
+  ai-news:
+    build:
+      context: .
+      dockerfile: docker/ai-news/Dockerfile
+    container_name: ai-news
+    restart: always
+    environment:
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - AI_NEWS_CHANNEL_ID=${AI_NEWS_CHANNEL_ID}
+      - AWS_DEFAULT_REGION=ap-northeast-2
+      - S3_BUCKET=${S3_BUCKET}
+      - BEDROCK_REGION=${BEDROCK_REGION}
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID}
