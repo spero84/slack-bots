@@ -41,7 +41,7 @@ source /home/ubuntu/venvs/ai-news/bin/activate && python -m pytest
 - **uv 기반 가상환경 관리 — pip/venv 직접 사용 금지, 반드시 `uv venv` / `uv pip install` 사용**
 - **단위 테스트 필수 — 코드 변경 시 반드시 관련 테스트 작성 및 실행**
 - `.env`로 환경변수 관리 (절대 커밋하지 않음)
-- **작업 완료 후 반드시 `git push`까지 수행**
+- **작업 완료 후 반드시 `git pull` → `git push` 수행 (push 전에 항상 pull 먼저)**
 
 ## Key Patterns
 
@@ -367,4 +367,4 @@ ssh ec2 "/home/ubuntu/setup-venvs.sh"       # 3. venv 설정
 ssh ec2 "/home/ubuntu/restart-all.sh"       # 4. 서비스 재시작
 ```
 
-**작업 완료 후 반드시 `git add`, `git commit`, `git push`까지 수행할 것.**
+**작업 완료 후 반드시 `git add`, `git commit`, `git pull`, `git push` 수행할 것. (push 전에 항상 pull 먼저)**
