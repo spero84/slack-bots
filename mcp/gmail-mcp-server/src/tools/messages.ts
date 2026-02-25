@@ -10,10 +10,13 @@ import {
   SendMessageInput,
   ReplyMessageSchema,
   ReplyMessageInput,
+  GetThreadSchema,
+  GetThreadInput,
 } from "../schemas/index.js";
 import {
   searchMessages,
   getMessage,
+  getThreadMessages,
   sendEmail,
   replyToEmail,
   handleGmailError,
@@ -317,6 +320,86 @@ Returns:
       } catch (error) {
         return {
           content: [{ type: "text", text: handleGmailError(error) }],
+        };
+      }
+    }
+  );
+
+  // Get thread tool
+  server.registerTool(
+    "gmail_get_thread",
+    {
+      title: "Get Gmail Thread",
+      description: `Get all messages in a Gmail thread (conversation).
+
+Use this to read the full conversation history before composing a reply.
+
+Args:
+  - thread_id (string): The ID of the thread to retrieve
+  - response_format ('markdown' | 'json'): Output format (default: 'markdown')
+
+Returns:
+  All messages in the thread ordered chronologically, with full body content.`,
+      inputSchema: GetThreadSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async (params: GetThreadInput) => {
+      try {
+        const result = await getThreadMessages(params.thread_id);
+
+        if (result.messages.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `No messages found in thread: ${params.thread_id}`,
+              },
+            ],
+          };
+        }
+
+        let textContent: string;
+
+        if (params.response_format === ResponseFormat.MARKDOWN) {
+          const lines = [
+            "# Gmail Thread",
+            "",
+            `**Thread ID**: ${result.threadId}`,
+            `**Messages**: ${result.messageCount}`,
+            "",
+          ];
+
+          for (const email of result.messages) {
+            lines.push(formatEmailToMarkdown(email, true));
+            lines.push("");
+            lines.push("---");
+            lines.push("");
+          }
+
+          textContent = lines.join("\n");
+        } else {
+          textContent = JSON.stringify(result, null, 2);
+        }
+
+        // Truncate if too long
+        if (textContent.length > CHARACTER_LIMIT) {
+          textContent =
+            textContent.substring(0, CHARACTER_LIMIT) +
+            "\n\n... [Response truncated. Thread has too many messages.]";
+        }
+
+        return {
+          content: [{ type: "text" as const, text: textContent }],
+          structuredContent: result,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text" as const, text: handleGmailError(error) }],
         };
       }
     }

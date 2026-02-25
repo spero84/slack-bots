@@ -102,3 +102,11 @@ export interface GmailListResponse {
   nextPageToken?: string;
   resultSizeEstimate?: number;
 }
+
+// Thread result interface
+export interface ThreadResult {
+  [key: string]: unknown;
+  threadId: string;
+  messageCount: number;
+  messages: EmailMessage[];
+}

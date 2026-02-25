@@ -13,6 +13,7 @@ import {
   DraftEmailParams,
   DraftResult,
   DraftsListResult,
+  ThreadResult,
 } from "../types.js";
 import { GMAIL_SCOPES, TOKEN_PATH, CREDENTIALS_PATH } from "../constants.js";
 
@@ -352,16 +353,54 @@ export async function getMessageHeaders(messageId: string): Promise<{ messageId:
 }
 
 /**
+ * Check if a string contains non-ASCII characters
+ */
+function hasNonAscii(str: string): boolean {
+  return /[^\x00-\x7F]/.test(str);
+}
+
+/**
+ * Encode a string using RFC 2047 Base64 encoding for MIME headers.
+ * Only encodes if the string contains non-ASCII characters.
+ */
+function encodeRfc2047(str: string): string {
+  if (!hasNonAscii(str)) return str;
+  const encoded = Buffer.from(str, "utf-8").toString("base64");
+  return `=?UTF-8?B?${encoded}?=`;
+}
+
+/**
+ * Encode email addresses for MIME headers (RFC 2047).
+ * Handles "Display Name <email>" format and comma-separated multiple addresses.
+ * Only the display name is encoded; the email address is left as-is.
+ */
+function encodeMimeAddress(address: string): string {
+  return address
+    .split(",")
+    .map((addr) => {
+      addr = addr.trim();
+      const match = addr.match(/^(.+?)\s*<([^>]+)>$/);
+      if (match) {
+        const name = match[1].replace(/^["']|["']$/g, "").trim();
+        const email = match[2];
+        return `${encodeRfc2047(name)} <${email}>`;
+      }
+      return addr;
+    })
+    .join(", ");
+}
+
+/**
  * Create MIME message for sending
  */
 function createMimeMessage(params: SendEmailParams): string {
   const contentType = params.isHtml ? "text/html" : "text/plain";
 
   let message = [
-    `To: ${params.to}`,
-    params.cc ? `Cc: ${params.cc}` : "",
-    params.bcc ? `Bcc: ${params.bcc}` : "",
-    `Subject: ${params.subject}`,
+    `To: ${encodeMimeAddress(params.to)}`,
+    params.cc ? `Cc: ${encodeMimeAddress(params.cc)}` : "",
+    params.bcc ? `Bcc: ${encodeMimeAddress(params.bcc)}` : "",
+    `Subject: ${encodeRfc2047(params.subject)}`,
     `MIME-Version: 1.0`,
     `Content-Type: ${contentType}; charset="UTF-8"`,
     "",
@@ -385,10 +424,10 @@ function createDraftMimeMessage(params: DraftEmailParams): string {
   const contentType = params.isHtml ? "text/html" : "text/plain";
 
   const lines = [
-    `To: ${params.to}`,
-    params.cc ? `Cc: ${params.cc}` : "",
-    params.bcc ? `Bcc: ${params.bcc}` : "",
-    `Subject: ${params.subject}`,
+    `To: ${encodeMimeAddress(params.to)}`,
+    params.cc ? `Cc: ${encodeMimeAddress(params.cc)}` : "",
+    params.bcc ? `Bcc: ${encodeMimeAddress(params.bcc)}` : "",
+    `Subject: ${encodeRfc2047(params.subject)}`,
     params.inReplyTo ? `In-Reply-To: ${params.inReplyTo}` : "",
     params.references ? `References: ${params.references}` : "",
     `MIME-Version: 1.0`,
@@ -481,12 +520,74 @@ export async function replyToEmail(
 }
 
 /**
+ * Get the user's Gmail signature from their primary SendAs settings.
+ * Returns the HTML signature string, or null if not available.
+ */
+async function getSignature(): Promise<string | null> {
+  const gmail = await initializeGmailClient();
+
+  const response = await gmail.users.settings.sendAs.list({
+    userId: "me",
+  });
+
+  const sendAsList = response.data.sendAs || [];
+  // Find the primary (default) send-as entry
+  const primary = sendAsList.find((s) => s.isDefault) || sendAsList[0];
+  if (primary?.signature) {
+    return primary.signature;
+  }
+  return null;
+}
+
+/**
+ * Strip HTML tags from a string (for plain text fallback of signature)
+ */
+function stripHtmlTags(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/div>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Append Gmail signature to the email body.
+ * For HTML bodies, appends as HTML. For plain text, strips HTML tags from signature.
+ */
+function appendSignature(body: string, signature: string, isHtml: boolean): string {
+  if (isHtml) {
+    return `${body}<br><br><div class="gmail_signature_container">--<br><div dir="ltr" class="gmail_signature">${signature}</div></div>`;
+  } else {
+    const textSignature = stripHtmlTags(signature);
+    return `${body}\n\n--\n${textSignature}`;
+  }
+}
+
+/**
  * Create a new draft
  */
 export async function createDraft(params: DraftEmailParams): Promise<DraftResult> {
   const gmail = await initializeGmailClient();
 
-  const raw = createDraftMimeMessage(params);
+  // Auto-append Gmail signature
+  let bodyWithSignature = params.body;
+  try {
+    const signature = await getSignature();
+    if (signature) {
+      bodyWithSignature = appendSignature(params.body, signature, params.isHtml ?? false);
+    }
+  } catch (e) {
+    // Signature fetch failed — proceed without signature
+  }
+
+  const raw = createDraftMimeMessage({ ...params, body: bodyWithSignature });
 
   const response = await gmail.users.drafts.create({
     userId: "me",
@@ -628,6 +729,30 @@ export async function modifyLabels(
   });
 
   return response.data.labelIds || [];
+}
+
+/**
+ * Get all messages in a thread, ordered chronologically.
+ */
+export async function getThreadMessages(threadId: string): Promise<ThreadResult> {
+  const gmail = await initializeGmailClient();
+
+  const response = await gmail.users.threads.get({
+    userId: "me",
+    id: threadId,
+    format: "full",
+  });
+
+  const threadMessages = response.data.messages || [];
+  const messages: EmailMessage[] = threadMessages.map((msg) =>
+    toEmailMessage(msg as GmailMessageResponse, true)
+  );
+
+  return {
+    threadId,
+    messageCount: messages.length,
+    messages,
+  };
 }
 
 /**

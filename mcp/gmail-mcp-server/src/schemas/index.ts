@@ -186,6 +186,19 @@ export const ListDraftsSchema = z
 
 export type ListDraftsInput = z.infer<typeof ListDraftsSchema>;
 
+// Get thread schema
+export const GetThreadSchema = z
+  .object({
+    thread_id: z
+      .string()
+      .min(1, "Thread ID is required")
+      .describe("The ID of the thread to retrieve"),
+  })
+  .merge(ResponseFormatSchema)
+  .strict();
+
+export type GetThreadInput = z.infer<typeof GetThreadSchema>;
+
 // List labels schema
 export const ListLabelsSchema = z
   .object({})

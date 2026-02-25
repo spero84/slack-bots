@@ -58,7 +58,7 @@ MCP gmail 도구(mcp__gmail__*)를 직접 호출하여:
 | 고객사 | `고객` |
 
 ## 3단계: 메일 초안 작성 (절대 전송 금지)
-MCP gmail 도구(mcp__gmail__gmail_create_draft, mcp__gmail__gmail_create_reply_draft)를 직접 호출하여:
+MCP gmail 도구(mcp__gmail__gmail_create_draft, mcp__gmail__gmail_create_reply_draft, mcp__gmail__gmail_get_thread)를 직접 호출하여:
 - 응답이 필요한 메일 식별
 - **본인 이메일: shawn.kim@searchdoc.ai**
 - **다음 메일은 초안 작성 대상에서 제외:**
@@ -70,20 +70,19 @@ MCP gmail 도구(mcp__gmail__gmail_create_draft, mcp__gmail__gmail_create_reply_
   - `to` 배열에 shawn.kim@searchdoc.ai가 포함되어 있지 않으면 → 초안 작성 제외
   - 예: to=["joonsun@searchdoc.ai"] → 내가 받은 메일이 아님 → 제외!
   - 예: to=["shawn.kim@searchdoc.ai"] → 초안 작성 대상 ✅
+- **회신 초안 작성 시 반드시 스레드 전체를 먼저 읽으세요:**
+  1. 메일의 `threadId`를 확인
+  2. `mcp__gmail__gmail_get_thread`로 해당 스레드의 전체 대화 내역 조회
+  3. 전체 맥락을 파악한 후 `mcp__gmail__gmail_create_reply_draft`로 회신 초안 작성
 - 각 메일에 대해 초안만 작성 (Gmail Drafts에 저장)
 - 초안 목록 생성
 - **중요: 메일을 절대 전송하지 마세요. 초안 생성만 허용됩니다.**
-- **초안 형식:** 아래 서명을 포함하여 비즈니스 메일 형식으로 작성:
+- **초안 형식:** 비즈니스 메일 형식으로 작성 (서명은 Gmail에서 자동 첨부됩니다):
   - 인사: "안녕하십니까? Searchdoc의 김성헌입니다."
   - 본문
-  - 맺음: "감사합니다.\n\n김성헌 드림"
-  - 서명 블록 (HTML 형식으로 작성):
-    김성헌 | Shawn Kim
-    Co-Founder & COO & 정보관리기술사
-    E: shawn.kim@searchdoc.ai
-    M: 010-9113-8566
-    A: 경기 성남시 분당구 대왕판교로 660
-    <img src="https://ci3.googleusercontent.com/mail-sig/AIorK4zO1WNCsIuf3DuXrZVUSmBzSifW4-DS1pB7-XS0bQD6g5kdf7elWmpS1NrdISWtKPSZrGFbck7-Oou_" width="120">
+  - 맺음: "감사합니다.<br><br>김성헌 드림"
+  - **반드시 `is_html: true`로 설정하세요** (서명이 HTML 형식으로 자동 첨부됩니다)
+  - **서명은 자동으로 첨부됩니다. 본문에 서명을 직접 작성하지 마세요.**
 
 ## 4단계: 결과 보고 (Slack 채널) — 반드시 실행!
 MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **전용 업무 보고 채널**로 전송:
