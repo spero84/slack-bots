@@ -5,7 +5,8 @@ import subprocess
 import logging
 import os
 import json
-from datetime import datetime
+import time
+from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -17,13 +18,73 @@ os.makedirs(LOG_DIR, exist_ok=True)
 # Claude CLI 경로 (systemd 환경에서 PATH에 없을 수 있음)
 CLAUDE_PATH = os.path.join(HOME_DIR, ".local", "bin", "claude")
 
+LAST_RUN_FILE = os.path.join(LOG_DIR, "scheduler_last_run.json")
+DEFAULT_LOOKBACK_SECONDS = 86400   # 파일 없을 때 기본 24시간
+MAX_LOOKBACK_SECONDS = 259200      # 최대 72시간 (주말 커버)
+
+KST = timezone(timedelta(hours=9))
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-WORKFLOW_PROMPT = """
+def load_last_run_timestamp() -> float:
+    """마지막 실행 시각(epoch)을 파일에서 로드.
+
+    파일 없음/손상/미래시각 → 24시간 전 기본값.
+    72시간 초과 → 72시간으로 cap.
+    """
+    now = time.time()
+    default_ts = now - DEFAULT_LOOKBACK_SECONDS
+
+    try:
+        with open(LAST_RUN_FILE, "r") as f:
+            data = json.load(f)
+        last_run = float(data["last_run_epoch"])
+
+        # 미래 타임스탬프 방지
+        if last_run > now:
+            logger.warning(f"미래 타임스탬프 감지 ({last_run}), 기본값 사용")
+            return default_ts
+
+        # 72시간 초과 제한
+        if now - last_run > MAX_LOOKBACK_SECONDS:
+            logger.warning(f"마지막 실행이 72시간 초과, 72시간으로 제한")
+            return now - MAX_LOOKBACK_SECONDS
+
+        return last_run
+
+    except FileNotFoundError:
+        logger.info("마지막 실행 기록 없음, 기본 24시간 전부터 검색")
+        return default_ts
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+        logger.warning(f"마지막 실행 파일 손상: {e}, 기본값 사용")
+        return default_ts
+
+
+def save_last_run_timestamp():
+    """현재 시각을 마지막 실행 타임스탬프로 저장."""
+    now = time.time()
+    data = {
+        "last_run_epoch": now,
+        "last_run_iso": datetime.fromtimestamp(now, tz=KST).isoformat(),
+    }
+    try:
+        with open(LAST_RUN_FILE, "w") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info(f"실행 타임스탬프 저장: {data['last_run_iso']}")
+    except OSError as e:
+        logger.error(f"타임스탬프 저장 실패: {e}")
+
+
+def build_workflow_prompt(gmail_after_epoch: int) -> str:
+    """워크플로우 프롬프트를 Gmail 검색 시간 범위와 함께 동적 생성."""
+    after_dt = datetime.fromtimestamp(gmail_after_epoch, tz=KST)
+    after_str = after_dt.strftime("%Y-%m-%d %H:%M KST")
+
+    return f"""
 다음 워크플로우를 순서대로 실행해주세요. 반드시 MCP 도구를 호출하여 최신 데이터를 조회하고, 4단계까지 모두 완료하세요.
 
 ## 1단계: Notion Kanban 확인
@@ -36,7 +97,7 @@ MCP notion 도구(mcp__notion__*)를 직접 호출하여:
 
 ## 2단계: Gmail 확인 및 라벨링
 MCP gmail 도구(mcp__gmail__*)를 직접 호출하여:
-- 최근 1시간 내 새 메일 검색 (newer_than:1h)
+- {after_str} 이후 새 메일 검색 (after:{gmail_after_epoch})
 - 중요 메일 필터링 (is:important)
 - 미읽음 메일 요약
 - **사용자 라벨이 없는 이메일에 아래 규칙에 따라 라벨 적용:**
@@ -207,16 +268,20 @@ def format_event(event):
 
 def run_workflow():
     """Claude CLI로 워크플로우 실행 (실시간 로그)"""
+    gmail_after_epoch = int(load_last_run_timestamp())
+    save_last_run_timestamp()
+    prompt = build_workflow_prompt(gmail_after_epoch)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     detail_log = os.path.join(LOG_DIR, f"workflow_{timestamp}.log")
     raw_log = os.path.join(LOG_DIR, f"workflow_{timestamp}.json")
 
-    logger.info(f"워크플로우 시작 - 실시간 로그: tail -f {detail_log}")
+    logger.info(f"워크플로우 시작 - Gmail 검색 기준: after:{gmail_after_epoch} - 실시간 로그: tail -f {detail_log}")
 
     cmd = [
         CLAUDE_PATH, "-p",
         "--model", "global.anthropic.claude-opus-4-6-v1",
-        WORKFLOW_PROMPT,
+        prompt,
         "--dangerously-skip-permissions",
         "--verbose",
         "--output-format", "stream-json",
