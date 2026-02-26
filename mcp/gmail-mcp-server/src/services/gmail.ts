@@ -396,18 +396,16 @@ function encodeMimeAddress(address: string): string {
 function createMimeMessage(params: SendEmailParams): string {
   const contentType = params.isHtml ? "text/html" : "text/plain";
 
-  let message = [
+  const headers = [
     `To: ${encodeMimeAddress(params.to)}`,
-    params.cc ? `Cc: ${encodeMimeAddress(params.cc)}` : "",
-    params.bcc ? `Bcc: ${encodeMimeAddress(params.bcc)}` : "",
+    params.cc ? `Cc: ${encodeMimeAddress(params.cc)}` : null,
+    params.bcc ? `Bcc: ${encodeMimeAddress(params.bcc)}` : null,
     `Subject: ${encodeRfc2047(params.subject)}`,
     `MIME-Version: 1.0`,
     `Content-Type: ${contentType}; charset="UTF-8"`,
-    "",
-    params.body,
-  ]
-    .filter(Boolean)
-    .join("\r\n");
+  ].filter(Boolean);
+
+  const message = [...headers, "", params.body].join("\r\n");
 
   // Encode to base64url
   return Buffer.from(message)
@@ -423,20 +421,18 @@ function createMimeMessage(params: SendEmailParams): string {
 function createDraftMimeMessage(params: DraftEmailParams): string {
   const contentType = params.isHtml ? "text/html" : "text/plain";
 
-  const lines = [
+  const headers = [
     `To: ${encodeMimeAddress(params.to)}`,
-    params.cc ? `Cc: ${encodeMimeAddress(params.cc)}` : "",
-    params.bcc ? `Bcc: ${encodeMimeAddress(params.bcc)}` : "",
+    params.cc ? `Cc: ${encodeMimeAddress(params.cc)}` : null,
+    params.bcc ? `Bcc: ${encodeMimeAddress(params.bcc)}` : null,
     `Subject: ${encodeRfc2047(params.subject)}`,
-    params.inReplyTo ? `In-Reply-To: ${params.inReplyTo}` : "",
-    params.references ? `References: ${params.references}` : "",
+    params.inReplyTo ? `In-Reply-To: ${params.inReplyTo}` : null,
+    params.references ? `References: ${params.references}` : null,
     `MIME-Version: 1.0`,
     `Content-Type: ${contentType}; charset="UTF-8"`,
-    "",
-    params.body,
-  ];
+  ].filter(Boolean);
 
-  const message = lines.filter(Boolean).join("\r\n");
+  const message = [...headers, "", params.body].join("\r\n");
 
   // Encode to base64url
   return Buffer.from(message)
