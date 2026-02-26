@@ -51,12 +51,17 @@ AI_KEYWORDS = [
     "knowledge base", "information retrieval", "document",
     "chunking", "reranking", "re-ranking",
     "optical character", "document processing", "text extraction",
+    "search engine", "indexing", "indexing pipeline",
+    "hybrid search", "BM25", "search ranking",
+    "Elasticsearch", "OpenSearch",
+    "inverted index", "query processing",
     # 벡터/임베딩 도구
     "FAISS", "Pinecone", "Weaviate", "Milvus", "ChromaDB", "Chroma",
     "LangChain", "LlamaIndex", "LangGraph",
     # 한국어 키워드
     "인공지능", "딥러닝", "머신러닝", "자연어처리", "생성형",
     "벡터", "검색", "문서", "임베딩",
+    "인덱싱", "검색 엔진", "하이브리드 검색",
     # 추가 기술 용어
     "fine tuning", "prompt engineering", "context window",
     "inference", "quantization", "distillation",
@@ -69,6 +74,7 @@ ARXIV_CATEGORIES = [
     "cs.CL",   # Computation and Language (NLP)
     "cs.CV",   # Computer Vision
     "cs.LG",   # Machine Learning
+    "cs.IR",   # Information Retrieval (검색, 인덱싱, 랭킹)
 ]
 
 # 크롤링 소스 URL

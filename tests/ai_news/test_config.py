@@ -64,12 +64,12 @@ class TestArxivCategories:
     """ARXIV_CATEGORIES 상수 검증"""
 
     def test_categories_count(self):
-        """4개 카테고리 확인"""
-        assert len(ARXIV_CATEGORIES) == 4
+        """5개 카테고리 확인"""
+        assert len(ARXIV_CATEGORIES) == 5
 
     def test_expected_categories(self):
         """예상 카테고리 확인"""
-        expected = ["cs.AI", "cs.CL", "cs.CV", "cs.LG"]
+        expected = ["cs.AI", "cs.CL", "cs.CV", "cs.LG", "cs.IR"]
         assert sorted(ARXIV_CATEGORIES) == sorted(expected)
 
 
@@ -89,6 +89,15 @@ class TestCrawlSources:
         """모든 소스에 name 필드 존재 확인"""
         for key, config in CRAWL_SOURCES.items():
             assert "name" in config, f"CRAWL_SOURCES['{key}']에 name 필드 없음"
+
+    def test_search_indexing_keywords_present(self):
+        """검색/인덱싱 관련 핵심 키워드 존재 확인"""
+        search_keywords = [
+            "search engine", "indexing", "hybrid search",
+            "BM25", "인덱싱", "검색 엔진", "하이브리드 검색",
+        ]
+        for keyword in search_keywords:
+            assert keyword in AI_KEYWORDS, f"검색/인덱싱 키워드 '{keyword}'가 AI_KEYWORDS에 없음"
 
     def test_arxiv_has_feeds(self):
         """arXiv 소스에 feeds 설정 확인"""
