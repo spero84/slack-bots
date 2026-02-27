@@ -1,39 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(terraform destroy:*)",
-      "Bash(terraform -chdir=terraform destroy)",
-      "Bash(terraform -chdir=terraform destroy -auto-approve)",
-      "Bash(aws s3 rb:*)",
-      "Bash(aws sts:*)",
-      "Bash(terraform init:*)",
-      "Bash(terraform plan:*)",
-      "Bash(terraform apply:*)",
-      "Bash(aws ec2 describe-key-pairs:*)",
+      "Bash(terraform:*)",
       "Bash(ls:*)",
-      "Bash(terraform state list:*)",
       "Bash(chmod:*)",
-      "Bash(docker build:*)",
-      "Bash(uv run python:*)",
-      "Bash(docker run:*)",
-      "Bash(aws ec2 describe-instances:*)",
-      "Bash(aws ec2 describe-network-interfaces:*)",
-      "Bash(aws ec2 describe-security-groups:*)",
-      "Bash(terraform refresh:*)",
-      "Bash(terraform state rm:*)",
-      "Bash(./scripts/deploy-to-s3.sh:*)",
-      "Bash(aws s3 mb:*)",
-      "Bash(aws s3 ls:*)",
-      "Bash(aws iam list-attached-role-policies:*)",
+      "Bash(uv:*)",
+      "Bash(aws:*)",
       "Bash(bash -n:*)",
-      "Bash(terraform validate:*)",
       "WebFetch(domain:www.nipa.kr)",
-      "Bash(python -m py_compile:*)",
-      "Bash(python:*)",
-      "Bash(pip install:*)",
-      "Bash(.venv/bin/python:*)",
-      "Bash(uv pip install:*)",
-      "Bash(src/gov_funding/.venv/bin/python:*)",
       "WebFetch(domain:docs.anthropic.com)",
       "mcp__slack__slack_list_channels",
       "mcp__notion__API-post-search",
@@ -47,20 +21,11 @@
       "Bash(systemctl status:*)",
       "Bash(aws s3api list-buckets:*)",
       "Bash(/home/ubuntu/venvs/slack-app/bin/pip install:*)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(git push:*)",
-      "Bash(gh auth:*)",
-      "Bash(claude model list:*)",
-      "Bash(claude --version:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)",
       "Bash(claude:*)",
       "Bash(sort:*)",
-      "Bash(AWS_DEFAULT_REGION=ap-northeast-2 aws s3 ls:*)",
-      "Bash(aws s3 cp:*)",
       "WebFetch(domain:boto3.amazonaws.com)",
-      "Bash(uv pip show:*)",
-      "Bash(/home/ubuntu/venvs/slack-app/bin/python3:*)",
-      "Bash(/home/ubuntu/venvs/gov-funding/bin/python3:*)",
       "WebFetch(domain:www.anthropic.com)",
       "WebFetch(domain:openai.com)",
       "WebFetch(domain:blog.google)",
@@ -80,7 +45,6 @@
       "Bash(/home/ubuntu/venvs/ai-news/bin/python -c:*)",
       "Bash(sudo systemctl start:*)",
       "Bash(sudo systemctl status:*)",
-      "Bash(aws s3vectors list-indexes:*)",
       "WebFetch(domain:www.aitimes.com)",
       "WebFetch(domain:www.aitimes.kr)",
       "WebFetch(domain:aws.amazon.com)",
@@ -99,7 +63,22 @@
       "Bash(sudo apt-get update:*)",
       "Bash(sudo apt-get install:*)",
       "Bash(wget:*)",
-      "Bash(gpg:*)"
+      "Bash(gpg:*)",
+      "Bash(find:*)",
+      "Bash(source /home/ubuntu/venvs/ai-news/bin/activate && python -m pytest tests/ai_news/test_dedup.py -v 2>&1)",
+      "Bash(tail:*)",
+      "Bash(source /home/ubuntu/venvs/ai-news/bin/activate && python -m pytest tests/ai_news/ -v 2>&1)",
+      "Bash(/home/ubuntu/status.sh:*)",
+      "Bash(source:*)",
+      "Bash(cd /home/ubuntu/slack-bots/mcp/gmail-mcp-server && npm run build 2>&1)",
+      "Bash(cd /home/ubuntu/slack-bots/mcp/gmail-mcp-server && npx tsc 2>&1)",
+      "Bash(npm install:*)",
+      "Bash(npx:*)",
+      "Bash(cd /home/ubuntu/slack-bots/mcp/gmail-mcp-server && node -e \"\nconst { getAuthUrl } = await import\\('./dist/services/gmail.js'\\);\nconsole.log\\(getAuthUrl\\(\\)\\);\n\" 2>&1)",
+      "Bash(cp:*)",
+      "mcp__gmail__gmail_list_drafts",
+      "mcp__gmail__gmail_get_message",
+      "Bash(node:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
@@ -108,5 +87,23 @@
     "gmail",
     "calendar",
     "notion"
-  ]
+  ],
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/check-service-restart.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/check-git-push.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
 }

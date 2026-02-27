@@ -144,6 +144,7 @@ MCP gmail 도구(mcp__gmail__gmail_create_draft, mcp__gmail__gmail_create_reply_
   - 맺음: "감사합니다.<br><br>김성헌 드림"
   - **반드시 `is_html: true`로 설정하세요** (서명이 HTML 형식으로 자동 첨부됩니다)
   - **서명은 자동으로 첨부됩니다. 본문에 서명을 직접 작성하지 마세요.**
+  - **HTML 본문에 <![CDATA[...]]> 같은 XML 구문을 절대 사용하지 마세요.** 순수 HTML만 작성하세요.
 
 ## 4단계: 결과 보고 (Slack 채널) — 반드시 실행!
 MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **전용 업무 보고 채널**로 전송:

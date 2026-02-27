@@ -39,9 +39,11 @@ source /home/ubuntu/venvs/ai-news/bin/activate && python -m pytest
 - `str` Enum으로 소스 정의 (`Source`, `ArticleSource`)
 - async/await 크롤러 패턴 (`BaseCrawler` ABC 상속)
 - **uv 기반 가상환경 관리 — pip/venv 직접 사용 금지, 반드시 `uv venv` / `uv pip install` 사용**
+- **`uv pip install`로 패키지 설치 시 해당 서비스의 `requirements*.txt`에 반드시 추가**
 - **단위 테스트 필수 — 코드 변경 시 반드시 관련 테스트 작성 및 실행**
 - `.env`로 환경변수 관리 (절대 커밋하지 않음)
 - **작업 완료 후 반드시 `git pull` → `git push` 수행 (push 전에 항상 pull 먼저)**
+- **`src/` 코드 수정 후 반드시 해당 서비스 재시작 (`sudo systemctl restart <service>`) — 서비스 매핑: `src/slack_app/` → slack-app, `src/scheduler/` → scheduler, `src/gov_funding/` → gov-funding, `src/ai_news/` → ai-news**
 
 ## Key Patterns
 

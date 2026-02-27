@@ -391,10 +391,31 @@ function encodeMimeAddress(address: string): string {
 }
 
 /**
+ * Sanitize email body by removing XML CDATA wrappers that Claude sometimes adds.
+ */
+function sanitizeBody(body: string): string {
+  return body
+    .replace(/^\s*<!\[CDATA\[/i, "")
+    .replace(/\]\]>\s*$/i, "")
+    .trim();
+}
+
+/**
+ * Encode a UTF-8 body string to base64 for MIME Content-Transfer-Encoding.
+ * Splits into 76-character lines per RFC 2045 §6.8.
+ */
+function encodeBodyForMime(body: string): string {
+  const base64 = Buffer.from(body, "utf-8").toString("base64");
+  return base64.replace(/(.{76})/g, "$1\r\n");
+}
+
+/**
  * Create MIME message for sending
  */
 function createMimeMessage(params: SendEmailParams): string {
   const contentType = params.isHtml ? "text/html" : "text/plain";
+  const cleanBody = sanitizeBody(params.body);
+  const encodedBody = encodeBodyForMime(cleanBody);
 
   const headers = [
     `To: ${encodeMimeAddress(params.to)}`,
@@ -403,11 +424,12 @@ function createMimeMessage(params: SendEmailParams): string {
     `Subject: ${encodeRfc2047(params.subject)}`,
     `MIME-Version: 1.0`,
     `Content-Type: ${contentType}; charset="UTF-8"`,
+    `Content-Transfer-Encoding: base64`,
   ].filter(Boolean);
 
-  const message = [...headers, "", params.body].join("\r\n");
+  const message = [...headers, "", encodedBody].join("\r\n");
 
-  // Encode to base64url
+  // Encode to base64url for Gmail API
   return Buffer.from(message)
     .toString("base64")
     .replace(/\+/g, "-")
@@ -420,6 +442,8 @@ function createMimeMessage(params: SendEmailParams): string {
  */
 function createDraftMimeMessage(params: DraftEmailParams): string {
   const contentType = params.isHtml ? "text/html" : "text/plain";
+  const cleanBody = sanitizeBody(params.body);
+  const encodedBody = encodeBodyForMime(cleanBody);
 
   const headers = [
     `To: ${encodeMimeAddress(params.to)}`,
@@ -430,11 +454,12 @@ function createDraftMimeMessage(params: DraftEmailParams): string {
     params.references ? `References: ${params.references}` : null,
     `MIME-Version: 1.0`,
     `Content-Type: ${contentType}; charset="UTF-8"`,
+    `Content-Transfer-Encoding: base64`,
   ].filter(Boolean);
 
-  const message = [...headers, "", params.body].join("\r\n");
+  const message = [...headers, "", encodedBody].join("\r\n");
 
-  // Encode to base64url
+  // Encode to base64url for Gmail API
   return Buffer.from(message)
     .toString("base64")
     .replace(/\+/g, "-")
