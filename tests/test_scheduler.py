@@ -186,3 +186,62 @@ class TestBuildWorkflowPrompt:
         """반환값이 str인지 확인."""
         prompt = build_workflow_prompt(1740000000)
         assert isinstance(prompt, str)
+
+
+class TestKanbanBoardScope:
+    """1단계 Notion Kanban 조회 대상 보드 테스트"""
+
+    def test_대상_3개_보드_모두_명시(self):
+        """조회 대상 3개 보드명이 프롬프트에 포함되는지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert "Kanban : LT Operation" in prompt
+        assert "Kanban: Management Support" in prompt
+        assert "Searchdoc Operation Board" in prompt
+
+    def test_3개_보드_data_source_id_포함(self):
+        """3개 보드의 확정된 data_source_id가 모두 포함되는지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert "24431fc3-cdaa-81da-8b9b-000be37b9905" in prompt  # LT Operation
+        assert "33631fc3-cdaa-8157-b790-000b885efad5" in prompt  # Management Support
+        assert "abc31fc3-cdaa-8318-9439-87d69ae43b48" in prompt  # Searchdoc Operation
+
+    def test_Shawn_user_id_포함(self):
+        """담당자 필터용 Shawn의 Notion user_id가 포함되는지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert "20cd872b-594c-810b-9d99-0002e207a7c1" in prompt
+
+    def test_보드별_담당자_속성명_포함(self):
+        """보드마다 다른 담당자 속성명이 모두 명시되는지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert "Reviewer" in prompt  # Management Support 전용
+        assert "Person" in prompt    # Searchdoc Operation 전용
+
+    def test_보드별_마감_속성명_포함(self):
+        """보드마다 다른 마감일 속성명이 모두 명시되는지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert "Start & Due Date" in prompt  # LT Operation
+        assert "Deadline" in prompt          # Management Support
+        assert "Due Date" in prompt          # Searchdoc Operation
+
+    def test_상태값_Ready_Commit_형식(self):
+        """실제 상태값 'Ready (Commit)'이 사용되는지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert "Ready (Commit)" in prompt
+        assert "In Progress" in prompt
+        assert "In Review" in prompt
+
+    def test_구_보드명_제거(self):
+        """이전 예시 보드명(Product, LT Internal)이 남아있지 않은지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert "LT Internal" not in prompt
+        assert "보드: Product" not in prompt
+
+    def test_보드_한정_지시_포함(self):
+        """3개 보드만 조회하라는 지시가 포함되는지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert "다른 보드는 조회하지 않는다" in prompt
+
+    def test_조회_실패_보고_지시_포함(self):
+        """보드 조회 실패 시 보고서에 명시하라는 지시가 포함되는지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert "보드 조회 실패" in prompt
