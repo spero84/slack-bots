@@ -76,6 +76,8 @@ except ImportError:
 ```
 KStartup, IITP, MSIT, MOTIE 크롤러가 Playwright 의존.
 
+`_init_browser()`는 `self.browser is None`뿐 아니라 `browser.is_connected()`까지 확인해야 한다. chromium 프로세스가 죽으면 객체는 남아있지만 연결이 끊겨, `is None`만 검사하면 죽은 브라우저를 계속 재사용해 이후 상세 페이지 수집이 전부 실패한다 (→ Bedrock이 제목/메타데이터만 보고 판단). 연결이 끊긴 경우 playwright 드라이버는 재사용하고 chromium만 재실행한다.
+
 ### 워크플로우 파이프라인
 - **gov-funding**: crawl → deduplicate → deadline_filter → keyword_filter → bedrock_filter → vector storage(S3 Vectors) → slack/gmail notify
 - **ai-news**: crawl → deduplicate → vector_key 비교(신규 식별) → bedrock_summarize → vector storage → slack notify
@@ -170,6 +172,7 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 | 리전 | `us-west-2` | `us-west-2` |
 | thinking | `{"type": "disabled"}` | `{"type": "disabled"}` |
 | max_tokens | 500 | 1000 |
+| 임계값 기본값 | 0.6 (관련성) | 0.5 (중요도) |
 
 **Sonnet 5 / Opus 5 주의사항:**
 - `temperature`를 보내면 `ValidationException: temperature is deprecated for this model` 발생 — 절대 포함하지 말 것
@@ -177,7 +180,8 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 - 응답 파싱은 `content[0]`이 아니라 **첫 `type == "text"` 블록**을 찾아야 한다
 
 **Bedrock 인증:** 모든 `bedrock-runtime` 클라이언트는 `Config(signature_version="v4")`를 명시한다. `.env`의 `AWS_BEARER_TOKEN_BEDROCK`(Claude CLI용)은 만료될 수 있고, 설정되어 있으면 boto3가 EC2 IAM Role 대신 그 토큰으로 인증을 시도해 InvokeModel이 전부 `AccessDeniedException`으로 실패한다.
-| 임계값 기본값 | 0.6 (관련성) | 0.5 (중요도) |
+
+**JSON 응답 파싱 (3단계 폴백):** 모델이 항상 유효한 JSON을 주지는 않는다 (요약문 내 이스케이프되지 않은 따옴표, 콤마 누락, 코드펜스). 두 분석기 모두 `extract_json_object()` → `extract_fields_fallback()`(정규식으로 점수/요약만 복구) → `(0.5, None)` 순서로 처리한다. 파싱 실패 시 원문 300자를 로그에 남긴다. 단순 `re.search(r"\{[^{}]+\}")`는 중첩 객체에서도 깨지므로 쓰지 않는다.
 
 ### Slack App Internals
 

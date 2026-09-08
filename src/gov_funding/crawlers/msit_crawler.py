@@ -37,8 +37,15 @@ class MsitCrawler(BaseCrawler):
         if not PLAYWRIGHT_AVAILABLE:
             raise RuntimeError("Playwright not installed")
 
+        # 크롬이 죽으면 browser 객체는 남아있지만 연결이 끊긴다.
+        # is_connected()까지 확인해 죽은 객체를 재사용하지 않는다.
+        if self.browser is not None and not self.browser.is_connected():
+            logger.warning("MSIT Playwright 브라우저 연결 끊김 - 재시작")
+            self.browser = None
+
         if self.browser is None:
-            self.playwright = await async_playwright().start()
+            if self.playwright is None:
+                self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch(
                 headless=True,
                 args=[

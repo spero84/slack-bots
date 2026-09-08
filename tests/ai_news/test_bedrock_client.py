@@ -94,3 +94,52 @@ def test_default_model_is_sonnet_5(monkeypatch):
     """크롤러 기본 모델이 Sonnet 5인지"""
     monkeypatch.delenv("BEDROCK_MODEL_ID", raising=False)
     assert Config().bedrock_model_id == "global.anthropic.claude-sonnet-5"
+
+
+# --- 응답 파싱 견고성 테스트 (실제 실패 사례) ---
+
+def _wrap(text: str) -> dict:
+    return {"content": [{"type": "text", "text": text}]}
+
+
+def test_parse_response_with_code_fence():
+    """마크다운 코드펜스로 감싼 응답도 파싱한다"""
+    response = _wrap(
+        '```json\n{"importance_score": 0.9, "ai_summary": "새 모델 발표"}\n```'
+    )
+    assert BedrockSummarizer()._parse_response(response) == (0.9, "새 모델 발표")
+
+
+def test_parse_response_with_nested_object():
+    """중첩 객체가 있어도 파싱한다 (기존 regex는 실패했다)"""
+    response = _wrap(
+        '{"importance_score": 0.8, "ai_summary": "요약", "meta": {"k": "v"}}'
+    )
+    assert BedrockSummarizer()._parse_response(response) == (0.8, "요약")
+
+
+def test_parse_response_recovers_from_unescaped_quote():
+    """요약문 내 따옴표로 JSON이 깨져도 점수/요약을 복구한다"""
+    response = _wrap(
+        '{\n  "importance_score": 0.75,\n'
+        '  "ai_summary": "이른바 "Google Jail" 문제다",\n'
+        '  "reason": "검색 관련"\n}'
+    )
+    score, summary = BedrockSummarizer()._parse_response(response)
+    assert score == 0.75
+    assert summary == '이른바 "Google Jail" 문제다'
+
+
+def test_parse_response_recovers_from_missing_comma():
+    """콤마 누락으로 JSON이 깨져도 점수를 복구한다"""
+    response = _wrap(
+        '{\n  "importance_score": 0.65\n  "ai_summary": "요약문"\n}'
+    )
+    score, _ = BedrockSummarizer()._parse_response(response)
+    assert score == 0.65
+
+
+def test_parse_response_unrecoverable_falls_back():
+    """복구 불가한 응답은 (0.5, None)으로 폴백한다"""
+    response = _wrap("죄송하지만 평가할 수 없습니다.")
+    assert BedrockSummarizer()._parse_response(response) == (0.5, None)

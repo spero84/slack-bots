@@ -1,5 +1,6 @@
 """Bedrock Claude 기반 관련성 분석"""
 import json
+import re
 from typing import TYPE_CHECKING, Optional
 
 import boto3
@@ -12,6 +13,55 @@ from ..utils.file_reader import extract_text_from_file
 
 if TYPE_CHECKING:
     from ..crawlers.base_crawler import BaseCrawler
+
+
+def extract_json_object(content: str) -> Optional[dict]:
+    """응답 텍스트에서 JSON 객체를 추출
+
+    마크다운 코드펜스나 앞뒤 설명 문장이 붙어도 파싱된다.
+    """
+    text = content.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+
+    candidates = [text]
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        candidates.append(match.group())
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+
+    return None
+
+
+def extract_fields_fallback(content: str) -> tuple[Optional[float], Optional[str]]:
+    """JSON이 깨졌을 때 정규식으로 점수/요약만 복구
+
+    요약문 안에 이스케이프되지 않은 따옴표가 들어가거나 콤마가 누락되면
+    json.loads가 실패한다. 이 경우 점수만이라도 살려서 0.5 폴백을 피한다.
+    """
+    score = None
+    score_match = re.search(r'"relevance_score"\s*:\s*([0-9]*\.?[0-9]+)', content)
+    if score_match:
+        try:
+            score = float(score_match.group(1))
+        except ValueError:
+            score = None
+
+    summary = None
+    summary_match = re.search(
+        r'"summary"\s*:\s*"(.*?)"\s*(?:,\s*"reason"|,?\s*\}|$)', content, re.DOTALL
+    )
+    if summary_match:
+        summary = summary_match.group(1).strip() or None
+
+    return score, summary
 
 
 class BedrockAnalyzer:
@@ -120,18 +170,25 @@ class BedrockAnalyzer:
             content = next(
                 b["text"] for b in response["content"] if b.get("type") == "text"
             )
-            # JSON 추출
-            import re
-            json_match = re.search(r"\{[^{}]+\}", content, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                score = float(data.get("relevance_score", 0.5))
-                summary = data.get("summary")
-                return score, summary
-        except (json.JSONDecodeError, KeyError, ValueError, StopIteration) as e:
-            logger.warning(f"응답 파싱 실패: {e}")
+        except (KeyError, StopIteration) as e:
+            logger.warning(f"응답에 text 블록이 없음: {e}")
+            return 0.5, None
 
-        return 0.5, None
+        data = extract_json_object(content)
+        if data is not None:
+            try:
+                return float(data.get("relevance_score", 0.5)), data.get("summary")
+            except (TypeError, ValueError) as e:
+                logger.warning(f"점수 변환 실패: {e}")
+
+        # JSON이 깨진 경우 필드 단위로 복구 시도
+        score, summary = extract_fields_fallback(content)
+        if score is None and summary is None:
+            logger.warning(f"응답 파싱 실패: {content[:300]}")
+            return 0.5, None
+
+        logger.warning("JSON 파싱 실패 - 정규식으로 필드 복구")
+        return score if score is not None else 0.5, summary
 
 
 async def _fetch_detail_content(
