@@ -18,7 +18,7 @@ class Config:
     # Bedrock
     bedrock_region: str = field(default_factory=lambda: os.environ.get("BEDROCK_REGION", "us-west-2"))
     bedrock_model_id: str = field(default_factory=lambda: os.environ.get(
-        "BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-6-v1"
+        "BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-5"
     ))
 
     # Filtering

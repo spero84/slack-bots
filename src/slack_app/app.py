@@ -8,6 +8,7 @@ import subprocess
 import uuid
 
 import boto3
+from botocore.config import Config
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -86,7 +87,13 @@ def _get_s3v_client():
 def _get_bedrock_embed_client():
     global _bedrock_embed_client
     if _bedrock_embed_client is None:
-        _bedrock_embed_client = boto3.client("bedrock-runtime", region_name=BEDROCK_REGION)
+        # signature_version="v4" 명시 — AWS_BEARER_TOKEN_BEDROCK(Claude CLI용, 만료 가능)을
+        # 무시하고 EC2 IAM Role(SigV4)로 인증한다.
+        _bedrock_embed_client = boto3.client(
+            "bedrock-runtime",
+            region_name=BEDROCK_REGION,
+            config=Config(signature_version="v4"),
+        )
     return _bedrock_embed_client
 
 

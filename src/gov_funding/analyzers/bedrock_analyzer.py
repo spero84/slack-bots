@@ -3,6 +3,7 @@ import json
 from typing import TYPE_CHECKING, Optional
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from ..storage import Announcement
@@ -20,7 +21,13 @@ class BedrockAnalyzer:
         config = get_config()
         self.model_id = model_id or config.bedrock_model_id
         self.region = region or config.bedrock_region  # Bedrock은 us-west-2 사용
-        self.client = boto3.client("bedrock-runtime", region_name=self.region)
+        # signature_version="v4" 명시 — AWS_BEARER_TOKEN_BEDROCK(Claude CLI용, 만료 가능)을
+        # 무시하고 EC2 IAM Role(SigV4)로 인증한다.
+        self.client = boto3.client(
+            "bedrock-runtime",
+            region_name=self.region,
+            config=Config(signature_version="v4"),
+        )
 
     async def analyze_relevance(
         self,
@@ -85,10 +92,12 @@ class BedrockAnalyzer:
 
     def _invoke_model(self, prompt: str) -> dict:
         """Bedrock 모델 호출"""
+        # Sonnet 5 / Opus 5는 temperature를 거부한다(ValidationException).
+        # thinking을 명시적으로 끄면 짧은 JSON 응답만 반환되어 max_tokens 안에서 안전하다.
         body = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": 500,
-            "temperature": 0.1,
+            "thinking": {"type": "disabled"},
             "messages": [
                 {"role": "user", "content": prompt}
             ],
@@ -107,7 +116,10 @@ class BedrockAnalyzer:
     def _parse_response(self, response: dict) -> tuple[float, Optional[str]]:
         """응답 파싱"""
         try:
-            content = response["content"][0]["text"]
+            # thinking 블록이 앞에 올 수 있으므로 첫 text 블록을 찾는다
+            content = next(
+                b["text"] for b in response["content"] if b.get("type") == "text"
+            )
             # JSON 추출
             import re
             json_match = re.search(r"\{[^{}]+\}", content, re.DOTALL)
@@ -116,7 +128,7 @@ class BedrockAnalyzer:
                 score = float(data.get("relevance_score", 0.5))
                 summary = data.get("summary")
                 return score, summary
-        except (json.JSONDecodeError, KeyError, ValueError) as e:
+        except (json.JSONDecodeError, KeyError, ValueError, StopIteration) as e:
             logger.warning(f"응답 파싱 실패: {e}")
 
         return 0.5, None

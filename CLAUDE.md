@@ -166,10 +166,17 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 | 항목 | gov-funding (분석) | ai-news (요약) |
 |------|-------------------|----------------|
 | API 버전 | `bedrock-2023-05-31` | `bedrock-2023-05-31` |
-| 모델 | `global.anthropic.claude-opus-4-6-v1` | `global.anthropic.claude-opus-4-6-v1` |
+| 모델 | `global.anthropic.claude-sonnet-5` | `global.anthropic.claude-sonnet-5` |
 | 리전 | `us-west-2` | `us-west-2` |
-| temperature | 0.1 | 0.1 |
+| thinking | `{"type": "disabled"}` | `{"type": "disabled"}` |
 | max_tokens | 500 | 1000 |
+
+**Sonnet 5 / Opus 5 주의사항:**
+- `temperature`를 보내면 `ValidationException: temperature is deprecated for this model` 발생 — 절대 포함하지 말 것
+- Opus 5는 thinking이 기본 ON이라 짧은 `max_tokens`를 thinking이 잠식하고 응답 첫 블록이 `thinking`이 됨. 대량 분류/요약 파이프라인에는 `thinking: {"type": "disabled"}`를 명시한 Sonnet 5를 사용한다
+- 응답 파싱은 `content[0]`이 아니라 **첫 `type == "text"` 블록**을 찾아야 한다
+
+**Bedrock 인증:** 모든 `bedrock-runtime` 클라이언트는 `Config(signature_version="v4")`를 명시한다. `.env`의 `AWS_BEARER_TOKEN_BEDROCK`(Claude CLI용)은 만료될 수 있고, 설정되어 있으면 boto3가 EC2 IAM Role 대신 그 토큰으로 인증을 시도해 InvokeModel이 전부 `AccessDeniedException`으로 실패한다.
 | 임계값 기본값 | 0.6 (관련성) | 0.5 (중요도) |
 
 ### Slack App Internals
@@ -247,7 +254,7 @@ slack-bots/
 | `S3_BUCKET` | S3 버킷 (gov-funding 벡터) | `gov-funding-monitor` |
 | `AI_NEWS_S3_BUCKET` | S3 버킷 (ai-news 벡터) | S3_BUCKET과 동일 |
 | `BEDROCK_REGION` | Bedrock 리전 | `us-west-2` |
-| `BEDROCK_MODEL_ID` | Bedrock 모델 ID | `global.anthropic.claude-opus-4-6-v1` |
+| `BEDROCK_MODEL_ID` | Bedrock 모델 ID (크롤러 분석/요약) | `global.anthropic.claude-sonnet-5` |
 | `EMBEDDING_MODEL_ID` | 임베딩 모델 ID | `amazon.titan-embed-text-v2:0` |
 | `SLACK_BOT_TOKEN` | Slack Bot Token | (필수) |
 | `SLACK_APP_TOKEN` | Slack App Token (Socket Mode) | (필수) |

@@ -3,6 +3,7 @@ import json
 import logging
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from ..utils import get_config
@@ -28,7 +29,13 @@ class S3VectorStorage:
         self.region = region or config.aws_region
         self.bedrock_region = bedrock_region or config.bedrock_region
         self.s3v = boto3.client("s3vectors", region_name=self.region)
-        self.bedrock = boto3.client("bedrock-runtime", region_name=self.bedrock_region)
+        # signature_version="v4" 명시 — AWS_BEARER_TOKEN_BEDROCK(Claude CLI용, 만료 가능)을
+        # 무시하고 EC2 IAM Role(SigV4)로 인증한다.
+        self.bedrock = boto3.client(
+            "bedrock-runtime",
+            region_name=self.bedrock_region,
+            config=Config(signature_version="v4"),
+        )
 
     def ensure_index(self):
         """인덱스가 없으면 자동 생성"""
