@@ -78,6 +78,21 @@ KStartup, IITP, MSIT, MOTIE 크롤러가 Playwright 의존.
 
 `_init_browser()`는 `self.browser is None`뿐 아니라 `browser.is_connected()`까지 확인해야 한다. chromium 프로세스가 죽으면 객체는 남아있지만 연결이 끊겨, `is None`만 검사하면 죽은 브라우저를 계속 재사용해 이후 상세 페이지 수집이 전부 실패한다 (→ Bedrock이 제목/메타데이터만 보고 판단). 연결이 끊긴 경우 playwright 드라이버는 재사용하고 chromium만 재실행한다.
 
+### RSS 소스 주의사항 (ai-news)
+
+HTML 스크래핑보다 RSS가 안정적이다. 실제로 세 소스가 조용히 고장난 적이 있다 — 크롤러가 0건을 반환해도 파이프라인은 에러 없이 끝나므로, **피드가 비어 있으면 반드시 WARNING을 남긴다**.
+
+| 소스 | 정상 URL | 고장 원인 |
+|------|----------|-----------|
+| arXiv | `https://rss.arxiv.org/rss/{cat}` | `export.arxiv.org/rss/{cat}`는 HTTP 200 + 유효 XML인데 item이 0건 |
+| OpenAI | `https://openai.com/news/rss.xml` | `openai.com/{index,blog,research}/` HTML 전부 403 (봇 차단) |
+| ETNews | `https://rss.etnews.com/04046.xml` (AI), `04043.xml` (SW) | `/news/article_list/AI` 경로 404. 섹션 목록은 `https://www.etnews.com/rss/` |
+
+- arXiv RSS는 `arxiv_announce_type`이 `new`/`cross`/`replace`/`replace-cross`다. `replace*`는 기존 논문 개정판이라 제외한다.
+- arXiv는 같은 발표 회차 논문에 **동일한 `pubDate`**를 부여하므로 시간 정렬이 무의미하다. 카테고리를 라운드로빈으로 병합해 편중을 막는다.
+- arXiv 제목에는 카테고리 접두어가 없다. `^[\w.]+:\s*`로 접두어를 제거하면 `TANGO: Humanoid...` 같은 제목의 앞부분이 잘린다.
+- `requests.exceptions.HTTPError`의 상태 코드를 볼 때 `if e.response:`는 쓰지 말 것 — `Response.__bool__`이 4xx/5xx에서 False라 403이 분기를 타지 못한다. `e.response is not None`으로 비교한다.
+
 ### 워크플로우 파이프라인
 - **gov-funding**: crawl → deduplicate → deadline_filter → keyword_filter → bedrock_filter → vector storage(S3 Vectors) → slack/gmail notify
 - **ai-news**: crawl → deduplicate → vector_key 비교(신규 식별) → bedrock_summarize → vector storage → slack notify

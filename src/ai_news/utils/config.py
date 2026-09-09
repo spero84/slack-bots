@@ -81,7 +81,9 @@ ARXIV_CATEGORIES = [
 CRAWL_SOURCES = {
     "arxiv": {
         "name": "arXiv",
-        "feeds": {cat: f"https://export.arxiv.org/rss/{cat}" for cat in ARXIV_CATEGORIES},
+        # export.arxiv.org/rss/{cat}는 유효하지만 항목이 항상 0건인 빈 피드를 반환한다.
+        # 실제 피드는 rss.arxiv.org에 있다.
+        "feeds": {cat: f"https://rss.arxiv.org/rss/{cat}" for cat in ARXIV_CATEGORIES},
     },
     "hackernews": {
         "name": "Hacker News",
@@ -100,6 +102,8 @@ CRAWL_SOURCES = {
     },
     "openai": {
         "name": "OpenAI",
+        # HTML 페이지는 봇 차단(403)이라 RSS를 1순위로 쓴다.
+        "rss_url": "https://openai.com/news/rss.xml",
         "blog_url": "https://openai.com/index/",
     },
     "deepmind": {
@@ -120,6 +124,11 @@ CRAWL_SOURCES = {
     },
     "etnews": {
         "name": "ETNews",
+        # 섹션 RSS (04046=AI, 04043=SW). AI 피드는 그대로, SW 피드는 키워드 필터 적용
+        "feeds": [
+            ("https://rss.etnews.com/04046.xml", False),
+            ("https://rss.etnews.com/04043.xml", True),
+        ],
         "url": "https://www.etnews.com/",
     },
     "itdaily": {
