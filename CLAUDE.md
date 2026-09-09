@@ -361,6 +361,8 @@ sudo systemctl restart gov-funding       # 개별 재시작
 sudo systemctl stop scheduler            # 개별 중지
 ```
 
+**재시작은 즉시 1회 워크플로우를 실행하고 Slack 알림을 발송한다.** gov-funding `main()`은 `execute_workflow(force_resend=True)`를, ai-news `main()`은 스케줄 등록 후 `execute_workflow()`를 무조건 호출한다. 따라서 두 서비스를 재시작하면 스케줄과 무관하게 채널에 알림이 한 번 더 올라간다 (gov-funding은 `force_resend=True`라 기존 공고까지 재발송). 코드 수정 후 재시작이 필요하면 이 비용을 감안한다.
+
 ## Testing
 
 ```bash
