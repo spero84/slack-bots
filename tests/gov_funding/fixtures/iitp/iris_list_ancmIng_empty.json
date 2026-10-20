@@ -1,0 +1,20 @@
+{
+ "sorgnIdArr": "10004",
+ "listBsnsAncmBtinSitu": [],
+ "pageIndex": "1",
+ "sorgnId": "10004",
+ "ancmPrg": "ancmIng",
+ "paginationInfo": {
+  "currentPageNo": 1,
+  "recordCountPerPage": 10,
+  "pageSize": 10,
+  "totalRecordCount": 0,
+  "totalPageCount": 1,
+  "firstPageNoOnPageList": 1,
+  "lastPageNoOnPageList": 1,
+  "firstRecordIndex": 0,
+  "lastRecordIndex": 10,
+  "firstPageNo": 1,
+  "lastPageNo": 1
+ }
+}

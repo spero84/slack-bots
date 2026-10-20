@@ -1,8 +1,5 @@
-"""모델 테스트"""
-import pytest
-from datetime import datetime, timedelta
-
-from src.storage.models import Announcement, Source, NotificationPayload
+"""gov-funding 모델 테스트"""
+from src.gov_funding.storage.models import Announcement, NotificationPayload, Source, canon_title
 
 
 class TestAnnouncement:
@@ -55,6 +52,12 @@ class TestAnnouncement:
         )
         # 특수문자, 공백 제거 후 소문자
         assert "2024년ai스타트업지원사업2차" == ann.normalized_title
+
+    def test_normalized_title_removes_middle_dots_and_boilerplate(self):
+        """'ㆍ'(U+318D)는 \\w라서 예전 정규화로는 남았다 — 다른 소스의 '·'와 같아야 한다"""
+        a = Announcement(id="1", source=Source.BIZINFO, title="2026년도 실증ㆍ확산 사업 공고", url="https://test.com")
+        b = Announcement(id="2", source=Source.MOTIE, title="2026년 실증·확산 사업 재공고", url="https://test.com")
+        assert a.normalized_title == b.normalized_title == canon_title(a.title) == "2026년실증확산사업"
 
     def test_announcement_equality(self):
         """공고 동등성 테스트"""

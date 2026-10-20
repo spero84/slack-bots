@@ -1,7 +1,11 @@
-"""Gmail API 기반 이메일 알림"""
+"""Gmail API 기반 이메일 알림
+
+GMAIL_CREDENTIALS 또는 EMAIL_RECIPIENTS가 비어 있으면 선택 채널이 꺼진 것으로 보고
+INFO 로그만 남긴 채 None을 반환한다 (실제 전송 실패만 ERROR).
+"""
 import base64
+import html
 import json
-from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional
@@ -11,6 +15,20 @@ from googleapiclient.discovery import build
 
 from ..storage import Announcement, NotificationPayload
 from ..utils import get_config, logger
+from ..utils.dates import today_kst
+from ..utils.text import clean_text
+from .slack_notifier import (
+    FOOTER_PREFIX,
+    SOURCE_DISPLAY_NAMES,
+    deadline_label,
+    normalize_plain,
+    summarize_sources,
+)
+
+
+def _esc(text: Optional[str]) -> str:
+    """HTML 본문/속성용 이스케이프"""
+    return html.escape(text or "", quote=True)
 
 
 class GmailNotifier:
@@ -22,20 +40,33 @@ class GmailNotifier:
         recipients: Optional[list[str]] = None,
     ):
         config = get_config()
-        self.credentials_json = credentials_json or config.gmail_credentials
-        self.recipients = recipients or config.email_recipients
+        # None일 때만 환경변수 값을 사용 (빈 문자열/빈 리스트는 명시적인 '미설정')
+        self.credentials_json = (
+            config.gmail_credentials if credentials_json is None else credentials_json
+        )
+        self.recipients = list(config.email_recipients if recipients is None else recipients)
         self._service = None
 
-    def _get_credentials_from_secrets(self) -> Optional[dict]:
-        """환경변수에서 Gmail 자격증명 조회"""
-        if not self.credentials_json:
-            logger.warning("GMAIL_CREDENTIALS 환경변수가 설정되지 않음")
-            return None
+    @property
+    def is_configured(self) -> bool:
+        """자격증명과 수신자가 모두 설정되어 있는지"""
+        return bool((self.credentials_json or "").strip() and self.recipients)
+
+    def _get_credentials_from_secrets(self) -> dict:
+        """환경변수의 Gmail 자격증명 JSON 파싱
+
+        Raises:
+            ValueError: 자격증명이 없거나 JSON 형식이 아닐 때
+        """
+        if not (self.credentials_json or "").strip():
+            raise ValueError("Gmail 자격증명을 찾을 수 없습니다")
         try:
-            return json.loads(self.credentials_json)
-        except json.JSONDecodeError:
-            logger.error("Gmail 자격증명 JSON 파싱 실패")
-            return None
+            data = json.loads(self.credentials_json)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Gmail 자격증명 JSON 파싱 실패: {e.msg}") from None
+        if not isinstance(data, dict):
+            raise ValueError("Gmail 자격증명 JSON 형식 오류 (객체가 아님)")
+        return data
 
     def _build_service(self):
         """Gmail API 서비스 빌드"""
@@ -43,9 +74,6 @@ class GmailNotifier:
             return self._service
 
         creds_data = self._get_credentials_from_secrets()
-        if not creds_data:
-            raise ValueError("Gmail 자격증명을 찾을 수 없습니다")
-
         credentials = Credentials(
             token=creds_data.get("access_token"),
             refresh_token=creds_data.get("refresh_token"),
@@ -57,68 +85,75 @@ class GmailNotifier:
         self._service = build("gmail", "v1", credentials=credentials)
         return self._service
 
-    async def send_notification(self, payload: NotificationPayload) -> bool:
-        """이메일 알림 전송
+    async def send_notification(self, payload: NotificationPayload) -> Optional[bool]:
+        """이메일 알림 전송 (수신자 전원을 To에 넣어 1회 전송)
 
         Args:
             payload: 알림 페이로드
 
         Returns:
-            전송 성공 여부
+            None: Gmail 미설정으로 스킵, True: 전송 성공(또는 보낼 내용 없음), False: 전송 실패
         """
-        if not payload.has_content:
+        if not self.is_configured:
+            logger.info("Gmail 미설정 - 이메일 전송 스킵")
+            logger.debug(
+                f"Gmail 설정 상태: 자격증명 {'있음' if (self.credentials_json or '').strip() else '없음'}, "
+                f"수신자 {len(self.recipients)}명"
+            )
+            return None
+
+        if not payload.new_announcements and not payload.deadline_soon:
             logger.info("알림 내용 없음 - 이메일 전송 스킵")
             return True
-
-        if not self.recipients:
-            logger.warning("이메일 수신자가 설정되지 않음")
-            return False
 
         try:
             service = self._build_service()
             message = self._create_message(payload)
-
-            for recipient in self.recipients:
-                result = service.users().messages().send(
-                    userId="me",
-                    body={"raw": message},
-                ).execute()
-                logger.info(f"이메일 전송 완료: {recipient} (ID: {result.get('id')})")
-
+            # Gmail은 To 헤더의 모든 주소로 배달하므로 한 번만 보낸다
+            result = service.users().messages().send(
+                userId="me",
+                body={"raw": message},
+            ).execute()
+            logger.info(
+                f"이메일 전송 완료: 수신자 {len(self.recipients)}명 (ID: {result.get('id')})"
+            )
             return True
 
         except Exception as e:
             logger.error(f"Gmail 전송 오류: {e}")
             return False
 
+    def _all_items(self, payload: NotificationPayload) -> list[Announcement]:
+        return list(payload.new_announcements) + list(payload.deadline_soon)
+
+    def _footer_text(self, payload: NotificationPayload) -> str:
+        sources = summarize_sources(self._all_items(payload), max_names=len(SOURCE_DISPLAY_NAMES))
+        return f"{FOOTER_PREFIX} | {sources}에서 자동 수집" if sources else FOOTER_PREFIX
+
+    def _subject(self, payload: NotificationPayload) -> str:
+        today = today_kst().strftime("%Y-%m-%d")
+        return (
+            f"[지원사업 알림] 신규 {len(payload.new_announcements)}건, "
+            f"마감임박 {len(payload.deadline_soon)}건 ({today})"
+        )
+
     def _create_message(self, payload: NotificationPayload) -> str:
-        """이메일 메시지 생성"""
-        today = datetime.now().strftime("%Y-%m-%d")
-        subject = f"[지원사업 알림] 신규 공고 {len(payload.new_announcements)}건 ({today})"
-
-        # HTML 본문 생성
-        html_body = self._build_html_body(payload)
-
-        # MIME 메시지 생성
+        """이메일 메시지 생성 (base64url 인코딩된 raw MIME)"""
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
+        msg["Subject"] = self._subject(payload)
         msg["From"] = "me"
         msg["To"] = ", ".join(self.recipients)
 
-        # 텍스트 버전
-        text_body = self._build_text_body(payload)
-        msg.attach(MIMEText(text_body, "plain", "utf-8"))
-
-        # HTML 버전
-        msg.attach(MIMEText(html_body, "html", "utf-8"))
+        msg.attach(MIMEText(self._build_text_body(payload), "plain", "utf-8"))
+        msg.attach(MIMEText(self._build_html_body(payload), "html", "utf-8"))
 
         return base64.urlsafe_b64encode(msg.as_bytes()).decode()
 
     def _build_html_body(self, payload: NotificationPayload) -> str:
         """HTML 이메일 본문 생성"""
-        today = datetime.now().strftime("%Y년 %m월 %d일")
+        today = today_kst().strftime("%Y년 %m월 %d일")
 
-        html = f"""
+        html_body = f"""
 <!DOCTYPE html>
 <html>
 <head>
@@ -147,98 +182,109 @@ class GmailNotifier:
         </div>
 """
 
-        # 신규 공고
         if payload.new_announcements:
-            html += f"""
+            html_body += f"""
         <div class="section">
             <div class="section-title">🆕 신규 공고 ({len(payload.new_announcements)}건)</div>
 """
             for ann in payload.new_announcements:
-                html += self._announcement_html(ann)
-            html += "</div>"
+                html_body += self._announcement_html(ann)
+            html_body += "</div>"
 
-        # 마감 임박
         if payload.deadline_soon:
-            html += f"""
+            html_body += f"""
         <div class="section">
             <div class="section-title">🔴 마감 임박 ({len(payload.deadline_soon)}건)</div>
 """
             for ann in payload.deadline_soon:
-                html += self._announcement_html(ann, urgent=True)
-            html += "</div>"
+                html_body += self._announcement_html(ann, urgent=True)
+            html_body += "</div>"
 
-        html += """
+        html_body += f"""
         <div class="footer">
-            <p>🤖 Gov Funding Monitor | K-Startup, 기업마당에서 자동 수집</p>
+            <p>{_esc(self._footer_text(payload))}</p>
         </div>
     </div>
 </body>
 </html>
 """
-        return html
+        return html_body
+
+    @staticmethod
+    def _meta_text(ann: Announcement) -> str:
+        """메타 정보 한 줄 (이스케이프 전 일반 텍스트)"""
+        source = getattr(ann.source, "value", str(ann.source))
+        meta_parts = [f"출처: {SOURCE_DISPLAY_NAMES.get(source, source)}"]
+        category = normalize_plain(ann.category)
+        if category:
+            meta_parts.append(f"분야: {category}")
+        meta_parts.append(f"마감: {deadline_label(ann)}")
+        organization = normalize_plain(ann.organization)
+        if organization:
+            meta_parts.append(f"기관: {organization}")
+        return " | ".join(meta_parts)
 
     def _announcement_html(self, ann: Announcement, urgent: bool = False) -> str:
-        """단일 공고 HTML 생성"""
+        """단일 공고 HTML 생성 (제목/URL/메타/요약 모두 이스케이프)"""
         urgent_class = " deadline-urgent" if urgent else ""
+        title = _esc(normalize_plain(ann.title) or "(제목 없음)")
 
-        meta_parts = []
-        if ann.category:
-            meta_parts.append(f"분야: {ann.category}")
-        if ann.d_day is not None:
-            d_day_text = f"D-{ann.d_day}" if ann.d_day > 0 else "마감"
-            meta_parts.append(f"마감: {d_day_text}")
-        if ann.organization:
-            meta_parts.append(f"기관: {ann.organization}")
-
-        meta_text = " | ".join(meta_parts)
+        url = (ann.url or "").strip()
+        if url.lower().startswith(("http://", "https://")):
+            title_html = f'<a href="{_esc(url)}">{title}</a>'
+        else:
+            title_html = title
 
         summary_html = ""
-        if ann.summary:
-            summary_html = f'<div class="announcement-summary">{ann.summary}</div>'
+        summary = clean_text(ann.summary)
+        if summary:
+            summary_html = (
+                f'<div class="announcement-summary">{_esc(summary).replace(chr(10), "<br>")}</div>'
+            )
 
         return f"""
             <div class="announcement{urgent_class}">
-                <div class="announcement-title"><a href="{ann.url}">{ann.title}</a></div>
-                <div class="announcement-meta">{meta_text}</div>
+                <div class="announcement-title">{title_html}</div>
+                <div class="announcement-meta">{_esc(self._meta_text(ann))}</div>
                 {summary_html}
             </div>
 """
 
     def _build_text_body(self, payload: NotificationPayload) -> str:
         """텍스트 이메일 본문 생성"""
-        today = datetime.now().strftime("%Y년 %m월 %d일")
+        today = today_kst().strftime("%Y년 %m월 %d일")
         lines = [
             f"📢 지원사업 공고 알림 ({today})",
             "=" * 50,
             "",
         ]
 
-        if payload.new_announcements:
-            lines.append(f"🆕 신규 공고 ({len(payload.new_announcements)}건)")
+        sections = [
+            ("🆕 신규 공고", payload.new_announcements),
+            ("🔴 마감 임박", payload.deadline_soon),
+        ]
+        for title, items in sections:
+            if not items:
+                continue
+            lines.append(f"{title} ({len(items)}건)")
             lines.append("-" * 30)
-            for ann in payload.new_announcements:
-                lines.append(f"• {ann.title}")
+            for ann in items:
+                lines.append(f"• {normalize_plain(ann.title)}")
                 lines.append(f"  {ann.url}")
-                if ann.d_day is not None:
-                    lines.append(f"  마감: D-{ann.d_day}")
-                lines.append("")
-
-        if payload.deadline_soon:
-            lines.append(f"🔴 마감 임박 ({len(payload.deadline_soon)}건)")
-            lines.append("-" * 30)
-            for ann in payload.deadline_soon:
-                lines.append(f"• {ann.title}")
-                lines.append(f"  {ann.url}")
-                lines.append(f"  마감: D-{ann.d_day}")
+                lines.append(f"  마감: {deadline_label(ann)}")
                 lines.append("")
 
         lines.append("-" * 50)
-        lines.append("🤖 Gov Funding Monitor | K-Startup, 기업마당에서 자동 수집")
+        lines.append(self._footer_text(payload))
 
         return "\n".join(lines)
 
 
-async def send_gmail_notification(payload: NotificationPayload) -> bool:
-    """편의 함수: Gmail 알림 전송"""
+async def send_gmail_notification(payload: NotificationPayload) -> Optional[bool]:
+    """편의 함수: Gmail 알림 전송
+
+    Returns:
+        None: 미설정으로 스킵, True: 성공(또는 보낼 내용 없음), False: 실패
+    """
     notifier = GmailNotifier()
     return await notifier.send_notification(payload)

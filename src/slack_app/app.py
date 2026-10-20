@@ -6,6 +6,8 @@ import os
 import re
 import subprocess
 import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import boto3
 from botocore.config import Config
@@ -115,14 +117,17 @@ def get_gov_funding_context(question):
 
         # 2. 메타데이터 필터 구성 (키워드 검색)
         metadata_filter = _extract_metadata_filter(question)
+        deadline_soon = _wants_deadline_soon(question)
 
         # 3. 벡터 유사도 검색
+        # 마감 임박 질문은 저장된 d_day가 저장 시점 값이라 필터로 쓸 수 없다.
+        # 넉넉히 검색한 뒤 마감일로 오늘(KST) 기준 D-day를 계산해 거른다.
         s3v = _get_s3v_client()
         kwargs = {
             "vectorBucketName": S3_VECTOR_BUCKET,
             "indexName": "announcements",
             "queryVector": {"float32": embedding},
-            "topK": 5,
+            "topK": 30 if deadline_soon else 5,
             "returnMetadata": True,
             "returnDistance": True,
         }
@@ -140,6 +145,9 @@ def get_gov_funding_context(question):
             results = s3v.query_vectors(**kwargs)
             vectors = results.get("vectors", [])
             logger.info(f"재검색 결과: {len(vectors)}건")
+
+        if deadline_soon:
+            vectors = _select_deadline_soon(vectors)
 
         return _format_vector_results(vectors)
 
@@ -164,15 +172,55 @@ def _extract_metadata_filter(question):
             filters.append({"source": source})
             break
 
-    # D-day 필터 (마감임박)
-    if any(kw in q for kw in ["마감", "임박", "긴급", "d-day"]):
-        filters.append({"d_day": {"$gte": 0, "$lte": 7}})
-
     if not filters:
         return None
     if len(filters) == 1:
         return filters[0]
     return {"$and": filters}
+
+
+def _wants_deadline_soon(question):
+    """마감 임박 공고 목록을 묻는 질문인지
+
+    '마감'만으로는 판단하지 않는다 — 'AI 바우처 마감일 언제야?'는 특정 공고를 묻는 질문이다.
+    """
+    q = question.lower().replace(" ", "")
+    return any(kw in q for kw in ["임박", "곧마감", "마감예정", "마감앞둔", "이번주", "긴급", "d-day"])
+
+
+def _days_until_deadline(meta):
+    """저장된 마감일 기준 오늘(KST)부터 남은 일수 (마감일 없으면 None, 지났으면 음수)
+
+    메타데이터의 d_day는 마지막 저장 시점 값이라 시간이 지나면 틀린다.
+    """
+    deadline = meta.get("deadline") or ""
+    try:
+        deadline_date = datetime.fromisoformat(deadline).date()
+    except ValueError:
+        return None
+    return (deadline_date - datetime.now(ZoneInfo("Asia/Seoul")).date()).days
+
+
+def _select_deadline_soon(vectors, max_days=7, limit=5, keep_top=2):
+    """마감 7일 이내 공고(마감 가까운 순) + 유사도 상위 공고
+
+    유사도 상위 keep_top건은 마감 전이면 항상 남긴다 — 질문이 특정 공고를 가리킬 수 있다.
+    마감 임박 공고가 없으면 아직 마감되지 않은 공고를 유사도 순으로 채운다.
+    """
+    with_days = [(v, _days_until_deadline(v.get("metadata", {}))) for v in vectors]
+    open_items = [(v, d) for v, d in with_days if d is None or d >= 0]
+    soon = sorted(
+        ((v, d) for v, d in open_items if d is not None and d <= max_days),
+        key=lambda item: item[1],
+    )
+
+    selected = [v for v, _ in open_items[:keep_top]]
+    for v, _ in soon + open_items:
+        if len(selected) >= limit:
+            break
+        if not any(v is s for s in selected):
+            selected.append(v)
+    return selected
 
 
 def _format_vector_results(vectors):
@@ -189,9 +237,13 @@ def _format_vector_results(vectors):
             parts.append(f"  출처: {meta['source']}")
         if meta.get("category"):
             parts.append(f"  분야: {meta['category']}")
-        d_day = meta.get("d_day")
-        if d_day is not None and d_day >= 0:
-            parts.append(f"  D-day: D-{d_day}")
+        days_left = _days_until_deadline(meta)
+        if days_left is not None:
+            deadline_date = meta["deadline"][:10]
+            if days_left < 0:
+                parts.append(f"  마감: 마감됨 ({deadline_date})")
+            else:
+                parts.append(f"  마감: {deadline_date} (D-{days_left})")
         if meta.get("organization"):
             parts.append(f"  주관기관: {meta['organization']}")
         if meta.get("department"):

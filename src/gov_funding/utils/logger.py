@@ -21,23 +21,15 @@ def setup_logger(
     """
     logger = logging.getLogger(name)
 
-    # 이미 핸들러가 있으면 재설정하지 않음
-    if logger.handlers:
-        return logger
-
-    logger.setLevel(level)
-
     # 기본 포맷
     if log_format is None:
         log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-    formatter = logging.Formatter(log_format)
-
-    # 콘솔 핸들러
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(level)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    # 출력은 루트 핸들러 하나로만 한다. 이 로거에 핸들러를 따로 붙이면 루트로도 전파되어
+    # 모든 줄이 두 번 찍힌다. (propagate=False로 막으면 pytest caplog가 로그를 못 잡는다)
+    # basicConfig는 루트에 핸들러가 이미 있으면 아무것도 하지 않는다.
+    logging.basicConfig(level=level, format=log_format, stream=sys.stdout)
+    logger.setLevel(level)
 
     return logger
 

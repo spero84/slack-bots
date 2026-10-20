@@ -1,306 +1,411 @@
-"""IITP(정보통신기획평가원) 크롤러 - Playwright 기반
+"""IITP(정보통신기획평가원) 크롤러 - requests 기반 (IRIS 사업공고)
 
-Vue.js 클라이언트 렌더링 사이트이므로 Playwright 필요.
+www.iitp.kr robots.txt가 'Disallow: /'이므로 IITP 사이트 대신 범부처통합연구지원시스템(IRIS)에서
+전문기관=정보통신기획평가원(sorgnId=10004)인 사업공고를 수집한다 (IRIS robots.txt는 공고 목록 허용).
+
+목록: POST https://www.iris.go.kr/contents/retrieveBsnsAncmBtinSituList.do (form, JSON 응답)
+- ancmPrg: ancmIng(접수중) / ancmPre(접수예정) / ancmEnd(마감) — 접수중·접수예정만 수집
+- 페이지당 10건 고정, pageIndex로 페이지 이동 (paginationInfo.totalPageCount)
+- 응답 listBsnsAncmBtinSitu[]: ancmId, ancmTl, ancmDe('YYYY-MM-DD'), rcveStrDe/rcveEndDe('YYYY.MM.DD' 또는 null), sorgnNm ...
+- 접수예정 목록에는 접수기간이 없는 오래된 공고(2018~2025)도 섞여 있다 → deadline_filter가 공고일(posted_date)로 제외
+
+상세: GET https://www.iris.go.kr/contents/retrieveBsnsAncmView.do?ancmId={id} (서버사이드 렌더링, 쿠키 불필요)
+- ancmPrg 파라미터는 내용에 영향 없음
+- 첨부: a.file_down의 f_bsnsAncm_downloadAtchFile('atchDocId','atchFileId','파일명',...)
+  → GET /comm/file/fileDownload.do?atchDocId=...&atchFileId=... (쿠키 없이 다운로드 가능)
 """
 import asyncio
-import hashlib
 import re
-from datetime import datetime
-from typing import Optional
+from datetime import date, datetime
+from typing import Optional, Sequence
+from urllib.parse import urlencode
+
+import requests
+from bs4 import BeautifulSoup
 
 from ..storage import Announcement, Source
 from ..utils import CRAWL_SOURCES, logger
+from ..utils.dates import calculate_d_day, today_kst
 from .base_crawler import BaseCrawler
 
-try:
-    from playwright.async_api import async_playwright, Browser, Page
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
-    logger.warning("Playwright not available - IITP crawler disabled")
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
+
+# ancmPrg → 분류 라벨
+PRG_LABELS = {"ancmIng": "접수중", "ancmPre": "접수예정", "ancmEnd": "마감"}
+
+DEFAULT_DEPARTMENT = "과학기술정보통신부"
+DEFAULT_ORGANIZATION = "정보통신기획평가원"
+
+# 2026.11.16 / 2026-11-16
+DATE_PATTERN = re.compile(r"(\d{4})[.\-/]\s*(\d{1,2})[.\-/]\s*(\d{1,2})")
+
+# f_bsnsAncm_downloadAtchFile('atchDocId','atchFileId','파일명' ,'크기')
+DOWNLOAD_JS_PATTERN = re.compile(r"f_bsnsAncm_downloadAtchFile\(\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']*)'")
+
+
+_BLOCK_TAGS = ["p", "div", "li", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6", "dt", "dd"]
+
+
+def _element_text(el) -> str:
+    """요소 텍스트 추출 (블록 요소 단위 줄바꿈, 스크립트 제외)
+
+    에디터 본문은 한 문단이 여러 <span>으로 쪼개져 있어 get_text("\\n")을 쓰면 단어 중간에서 줄이 깨진다.
+    """
+    for tag in el.select("script, style"):
+        tag.decompose()
+    for br in el.find_all("br"):
+        br.replace_with("\n")
+    for tag in el.find_all(["td", "th"]):
+        tag.append(" ")
+    for tag in el.find_all(_BLOCK_TAGS):
+        tag.append("\n")
+    lines = (re.sub(r"[ \t\u00a0\u3000]+", " ", line).strip() for line in el.get_text().splitlines())
+    return "\n".join(line for line in lines if line)
+
+
+def parse_date(text: Optional[str], end_of_day: bool = False) -> Optional[datetime]:
+    """IRIS 날짜 문자열 파싱 ('2026.11.16' / '2026-10-15')
+
+    end_of_day=True면 23:59:59로 설정 (마감일용).
+    """
+    if not text:
+        return None
+    match = DATE_PATTERN.search(str(text))
+    if not match:
+        return None
+    try:
+        year, month, day = map(int, match.groups())
+        if end_of_day:
+            return datetime(year, month, day, 23, 59, 59)
+        return datetime(year, month, day)
+    except ValueError:
+        return None
+
+
+def _attachment_priority(name: str) -> int:
+    """첨부파일 정렬 우선순위 — 공고문이 먼저 (Bedrock 분석은 첫 번째 지원 파일만 사용)"""
+    if "공고문" in name:
+        return 0
+    if "공고" in name:
+        return 1
+    return 2
+
+
+class IitpListError(Exception):
+    """IRIS 목록 조회 실패 (재시도 소진 또는 비정상 응답)"""
+
+
+class IitpUnavailableError(IitpListError):
+    """IRIS 접속 불가 (ConnectionError/Timeout/5xx 재시도 소진) — 남은 상태 목록도 요청하지 않는다"""
 
 
 class IitpCrawler(BaseCrawler):
-    """IITP 크롤러 (Vue.js 클라이언트 렌더링)"""
+    """IITP 크롤러 (IRIS 사업공고 JSON)"""
 
     source = Source.IITP
     name = "IITP"
 
-    def __init__(self):
+    def __init__(
+        self,
+        retry_delays: Optional[Sequence[float]] = None,
+        request_delay: float = 1.0,
+        timeout: float = 30,
+    ):
+        """
+        Args:
+            retry_delays: 목록 요청 재시도 전 대기 시간(초) 목록. 길이+1이 최대 시도 횟수 (기본 [10, 60] → 3회)
+            request_delay: 목록 페이지/상태 간 요청 간격(초)
+            timeout: 요청 타임아웃(초)
+        """
         self.config = CRAWL_SOURCES["iitp"]
-        self.browser: Optional[Browser] = None
-        self.playwright = None
-
-    async def _init_browser(self):
-        """브라우저 초기화"""
-        if not PLAYWRIGHT_AVAILABLE:
-            raise RuntimeError("Playwright not installed")
-
-        # 크롬이 죽으면 browser 객체는 남아있지만 연결이 끊긴다.
-        # is_connected()까지 확인해 죽은 객체를 재사용하지 않는다.
-        if self.browser is not None and not self.browser.is_connected():
-            logger.warning("IITP Playwright 브라우저 연결 끊김 - 재시작")
-            self.browser = None
-
-        if self.browser is None:
-            if self.playwright is None:
-                self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-gpu",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--single-process",
-                ],
-            )
-            logger.info("IITP Playwright 브라우저 시작됨")
+        self.retry_delays = tuple(retry_delays if retry_delays is not None else self.config["retry_delays"])
+        self.request_delay = request_delay
+        self.timeout = timeout
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": USER_AGENT,
+            "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+        })
+        # 상세 URL 생성용: 공고 ID → 수집 당시 ancmPrg
+        self._prg_by_id: dict[str, str] = {}
 
     async def crawl(self, max_items: int = 50) -> list[Announcement]:
-        """공고 목록 크롤링"""
-        if not PLAYWRIGHT_AVAILABLE:
-            logger.error("Playwright not available for IITP")
-            return []
+        """IRIS에서 IITP 접수중·접수예정 공고 수집
 
-        await self._init_browser()
-        page = await self.browser.new_page()
-
-        try:
-            # 페이지 로드 및 Vue.js 렌더링 대기
-            await page.goto(self.config["list_url"], wait_until="networkidle", timeout=60000)
-            await asyncio.sleep(3)  # Vue.js 데이터 바인딩 대기
-
-            # 30개씩 표시하도록 변경 (옵션 있을 경우)
-            try:
-                size_select = await page.query_selector("select[v-model*='pageSize'], select.page_size")
-                if size_select:
-                    await size_select.select_option(value="30")
-                    await asyncio.sleep(2)
-            except Exception:
-                pass
-
-            announcements = []
-            page_num = 1
-            max_pages = 5
-
-            while len(announcements) < max_items and page_num <= max_pages:
-                items = await self._parse_page(page)
-                new_items = [i for i in items if i.id not in {a.id for a in announcements}]
-                announcements.extend(new_items)
-
-                logger.info(f"IITP 페이지 {page_num}: {len(new_items)}건 추가 (총 {len(announcements)}건)")
-
-                if not new_items:
-                    break
-
-                # 다음 페이지로 이동
-                next_clicked = await self._click_next_page(page, page_num)
-                if not next_clicked:
-                    break
-
-                await asyncio.sleep(2)  # 페이지 로드 대기
-                page_num += 1
-
-            result = announcements[:max_items]
-            logger.info(f"IITP 크롤링 완료: 총 {len(result)}건")
-            return result
-
-        except Exception as e:
-            logger.error(f"IITP 크롤링 오류: {e}")
-            return []
-        finally:
-            await page.close()
-
-    async def _click_next_page(self, page: Page, current_page: int) -> bool:
-        """다음 페이지 클릭"""
-        try:
-            # 다음 페이지 번호 버튼 또는 '다음' 버튼 클릭
-            next_page = current_page + 1
-
-            # 페이지 번호 버튼 시도
-            page_btn = await page.query_selector(f"a:has-text('{next_page}'):not(:has-text('다'))")
-            if page_btn:
-                await page_btn.click()
-                return True
-
-            # '다음' 또는 '>' 버튼 시도
-            for selector in ["a:has-text('다음')", "a:has-text('>')", ".pagination .next a", "a.next"]:
-                next_btn = await page.query_selector(selector)
-                if next_btn:
-                    is_disabled = await next_btn.get_attribute("disabled")
-                    classes = await next_btn.get_attribute("class") or ""
-                    if not is_disabled and "disabled" not in classes:
-                        await next_btn.click()
-                        return True
-
-            return False
-        except Exception as e:
-            logger.debug(f"IITP 다음 페이지 클릭 실패: {e}")
-            return False
-
-    async def _parse_page(self, page: Page) -> list[Announcement]:
-        """현재 페이지의 공고 파싱"""
-        announcements = []
-
-        # Vue.js 렌더링된 목록 아이템 선택
-        # 테이블 또는 리스트 형태일 수 있음
-        items = await page.query_selector_all("table tbody tr")
-        if not items:
-            items = await page.query_selector_all("ul.list_wrap li, .board_list li, .list_area li")
-
-        for item in items:
-            try:
-                ann = await self._parse_item(item)
-                if ann:
-                    announcements.append(ann)
-            except Exception as e:
-                logger.debug(f"IITP 아이템 파싱 오류: {e}")
-
-        return announcements
-
-    async def _parse_item(self, item) -> Optional[Announcement]:
-        """개별 공고 아이템 파싱
-
-        IITP Vue.js 템플릿 구조:
-        - 순번: {{totalcount - item.rn + 1}}
-        - 제목: {{ item.title }}
-        - 접수기간: {{item.receipt_begin_date}} ~ {{item.receipt_end_date}}
-        - 담당자: {{item.charger_name}}
+        접수중 → 접수예정 순서, 각 목록은 IRIS 정렬(공고일 최신순)을 유지한다.
+        - 상태(ancmPrg)별로 오류를 격리한다: 한 상태 목록이 실패해도(4xx, 비정상 응답, 예상치 못한 오류)
+          그때까지 수집한 공고는 유지하고 다음 상태를 계속 수집한다.
+        - 재시도 후에도 접속 불가(IitpUnavailableError)면 사이트 장애로 보고 남은 상태는 요청하지 않는다.
+        - 형식이 이상한 항목 하나는 WARNING을 남기고 건너뛴다 (crawl() 전체가 실패하지 않도록).
         """
-        text = await item.inner_text()
-        if not text or "등록된 게시물이 없습니다" in text:
-            return None
+        today = today_kst()
+        announcements: list[Announcement] = []
+        seen_ids: set[str] = set()
+        max_pages = self.config.get("max_pages", 5)
+        first_request = True
 
-        inner_html = await item.inner_html()
-
-        # 제목 추출
-        title = ""
-        title_elem = await item.query_selector("a, .title, td:nth-child(2) a, td:nth-child(2)")
-        if title_elem:
-            title = (await title_elem.inner_text()).strip()
-
-        if not title:
-            return None
-
-        # 빈 행이나 헤더 행 스킵
-        if title in ["제목", "순번", "접수기간", "담당자"]:
-            return None
-
-        # ID 추출: onclick, href, data 속성에서
-        ann_id = None
-
-        # onclick에서 seq/id 추출
-        id_match = re.search(
-            r"(?:seq|idx|sn|id)[=:'\s]+(\d+)|view\s*\(\s*'?(\d+)|fn_detail\s*\(\s*'?(\d+)|goView\s*\(\s*'?(\d+)",
-            inner_html,
-            re.IGNORECASE,
-        )
-        if id_match:
-            ann_id = next(g for g in id_match.groups() if g)
-
-        # href에서 시도
-        if not ann_id:
-            href_match = re.search(r'href="[^"]*[?&]seq=(\d+)', inner_html)
-            if href_match:
-                ann_id = href_match.group(1)
-
-        # data 속성에서 시도
-        if not ann_id:
-            data_match = re.search(r'data-(?:seq|id|idx)="(\d+)"', inner_html)
-            if data_match:
-                ann_id = data_match.group(1)
-
-        if not ann_id:
-            ann_id = hashlib.md5(title.encode()).hexdigest()[:12]
-
-        # 접수기간에서 마감일 추출
-        deadline = None
-        d_day = None
-        period_match = re.search(
-            r'(\d{4}[.\-/]\d{2}[.\-/]\d{2})\s*~\s*(\d{4}[.\-/]\d{2}[.\-/]\d{2})',
-            text,
-        )
-        if period_match:
-            end_date_str = period_match.group(2).replace('.', '-').replace('/', '-')
+        for prg in self.config["ancm_prgs"]:
+            if len(announcements) >= max_items:
+                break
+            label = PRG_LABELS.get(prg, prg)
+            page = 1
             try:
-                deadline = datetime.strptime(end_date_str, "%Y-%m-%d")
-                deadline = deadline.replace(hour=23, minute=59, second=59)
-                delta = (deadline - datetime.now()).days
-                d_day = delta if delta >= 0 else None
-            except ValueError:
-                pass
+                while page <= max_pages and len(announcements) < max_items:
+                    if not first_request and self.request_delay:
+                        await asyncio.sleep(self.request_delay)
+                    first_request = False
 
-        # 담당자 추출 (마지막 컬럼)
-        cells = await item.query_selector_all("td")
-        charger_name = None
-        if cells and len(cells) >= 4:
-            charger_elem = cells[-1]
-            charger_name = (await charger_elem.inner_text()).strip()
+                    data = await self._fetch_list(prg, page)
+                    rows = data.get("listBsnsAncmBtinSitu")
+                    if not isinstance(rows, list):
+                        raise IitpListError(f"응답에 listBsnsAncmBtinSitu 없음 (ancmPrg={prg}, 키={list(data)[:10]})")
 
-        # 상세 URL
-        url = self.config["detail_url_template"].format(id=ann_id)
+                    added = 0
+                    for row in rows:
+                        try:
+                            ann = self._parse_row(row, prg, today)
+                        except Exception as e:
+                            row_id = row.get("ancmId") if isinstance(row, dict) else None
+                            logger.warning(
+                                f"IITP(IRIS) {label} 항목 파싱 오류 - 건너뜀 (ancmId={row_id}): {type(e).__name__}: {e}"
+                            )
+                            continue
+                        if ann is None or ann.id in seen_ids:
+                            continue
+                        seen_ids.add(ann.id)
+                        self._prg_by_id[ann.id] = prg
+                        announcements.append(ann)
+                        added += 1
+
+                    total_pages = self._total_pages(data)
+                    logger.info(
+                        f"IITP(IRIS) {label} 페이지 {page}/{total_pages}: "
+                        f"{len(rows)}건 중 {added}건 추가 (누적 {len(announcements)}건)"
+                    )
+                    if not rows or page >= total_pages:
+                        break
+                    page += 1
+            except IitpUnavailableError as e:
+                logger.warning(f"IITP(IRIS) 목록 조회 실패 - 사이트 장애로 보고 수집 중단 (누적 {len(announcements)}건 유지): {e}")
+                break
+            except IitpListError as e:
+                logger.warning(
+                    f"IITP(IRIS) {label} 목록 조회 실패 (page={page}) - {label} 수집 중단, 다음 상태 계속: {e}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"IITP(IRIS) {label} 목록 처리 오류 (page={page}) - {label} 수집 중단, 다음 상태 계속: "
+                    f"{type(e).__name__}: {e}"
+                )
+
+        result = announcements[:max_items]
+        if not result:
+            logger.warning("IITP 크롤링 결과 0건 - IRIS 사업공고 API/사이트 점검 필요")
+        else:
+            logger.info(f"IITP 크롤링 완료: 총 {len(result)}건")
+        return result
+
+    async def _fetch_list(self, prg: str, page: int) -> dict:
+        """목록 API 호출 (ConnectionError/Timeout/HTTP 5xx는 재시도)
+
+        Raises:
+            IitpUnavailableError: 재시도 소진 (접속 불가)
+            IitpListError: 4xx, JSON 파싱 실패, 비정상 응답
+        """
+        form = {
+            "ancmPrg": prg,
+            "pageIndex": str(page),
+            "sorgnId": self.config["sorgn_id"],
+            "sorgnIdArr": self.config["sorgn_id"],
+        }
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": self.config["list_url"],
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+        }
+        attempts = len(self.retry_delays) + 1
+
+        for attempt in range(1, attempts + 1):
+            reason = None
+            try:
+                response = self.session.post(
+                    self.config["list_api_url"], data=form, headers=headers, timeout=self.timeout
+                )
+                if response.status_code >= 500:
+                    reason = f"HTTP {response.status_code}"
+                else:
+                    response.raise_for_status()
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                reason = f"{type(e).__name__}: {e}"
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status is not None and status >= 500:
+                    reason = f"HTTP {status}"
+                else:
+                    raise IitpListError(f"HTTP {status} (ancmPrg={prg}, page={page})") from e
+            except requests.exceptions.RequestException as e:
+                raise IitpListError(f"{type(e).__name__}: {e}") from e
+
+            if reason is None:
+                try:
+                    data = response.json()
+                except ValueError as e:
+                    raise IitpListError(
+                        f"JSON 파싱 실패 ({type(e).__name__}, HTTP {response.status_code}, "
+                        f"content-type={response.headers.get('content-type')})"
+                    ) from e
+                if not isinstance(data, dict):
+                    raise IitpListError(f"예상치 못한 응답 형식: {type(data).__name__}")
+                return data
+
+            if attempt < attempts:
+                delay = self.retry_delays[attempt - 1]
+                logger.warning(
+                    f"IITP(IRIS) 목록 요청 실패 ({attempt}/{attempts}, ancmPrg={prg}, page={page}): "
+                    f"{reason} - {delay}초 후 재시도"
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.warning(
+                    f"IITP(IRIS) 목록 요청 실패 ({attempt}/{attempts}, ancmPrg={prg}, page={page}): {reason}"
+                )
+
+        raise IitpUnavailableError(f"{attempts}회 시도 모두 실패 (ancmPrg={prg}, page={page})")
+
+    @staticmethod
+    def _total_pages(data: dict) -> int:
+        """paginationInfo.totalPageCount (없으면 1)"""
+        info = data.get("paginationInfo") or {}
+        try:
+            return max(int(info.get("totalPageCount") or 1), 1)
+        except (TypeError, ValueError):
+            return 1
+
+    def _parse_row(self, row: dict, prg: str, today: Optional[date] = None) -> Optional[Announcement]:
+        """목록 JSON 항목 → Announcement"""
+        if not isinstance(row, dict):
+            return None
+        ancm_id = str(row.get("ancmId") or "").strip()
+        title = (row.get("ancmTl") or "").strip()
+        if not ancm_id or not title:
+            logger.debug(f"IITP(IRIS) ID/제목 없는 항목 스킵: {row}")
+            return None
+
+        deadline = parse_date(row.get("rcveEndDe"), end_of_day=True)
+        label = PRG_LABELS.get(prg, prg)
 
         return Announcement(
-            id=ann_id,
+            id=ancm_id,
             source=self.source,
             title=title,
-            category=None,
+            category=f"사업공고({label})",
             deadline=deadline,
-            d_day=d_day,
-            department="정보통신기획평가원",
-            organization=charger_name or "IITP",
-            url=url,
+            d_day=calculate_d_day(deadline, today or today_kst()),
+            department=(row.get("blngGovdSeNm") or "").strip() or DEFAULT_DEPARTMENT,
+            organization=(row.get("sorgnNm") or "").strip() or DEFAULT_ORGANIZATION,
+            url=self.config["detail_url_template"].format(id=ancm_id, prg=prg),
+            posted_date=parse_date(row.get("ancmDe")),
         )
 
     async def get_detail(self, announcement_id: str) -> Optional[dict]:
-        """공고 상세 정보 조회"""
-        if not PLAYWRIGHT_AVAILABLE:
-            return None
+        """IRIS 공고 상세 (본문 텍스트 + 첨부파일)
 
-        await self._init_browser()
-        page = await self.browser.new_page()
+        Returns:
+            {'content': str, 'attachments': [{'name': str, 'url': str}]} — 공고문 첨부가 먼저. 실패 시 None
+        """
+        params = {"ancmId": announcement_id}
+        prg = self._prg_by_id.get(announcement_id)
+        if prg:
+            params["ancmPrg"] = prg
 
         try:
-            url = self.config["detail_url_template"].format(id=announcement_id)
-            await page.goto(url, wait_until="networkidle", timeout=60000)
-            await asyncio.sleep(2)
-
-            # 상세 내용 추출
-            content_elem = await page.query_selector(
-                ".view_cont, .content, .board_view, .detail_wrap"
+            response = self.session.get(
+                self.config["detail_page_url"],
+                params=params,
+                headers={"Referer": self.config["list_url"]},
+                timeout=self.timeout,
             )
-            content = await content_elem.inner_text() if content_elem else ""
-
-            # 첨부파일 목록
-            attachments = []
-            file_links = await page.query_selector_all(
-                "a[href*='download'], a.file_down, .file_list a"
-            )
-            for link in file_links:
-                name = await link.inner_text()
-                href = await link.get_attribute("href")
-                if name and href:
-                    attachments.append({
-                        "name": name.strip(),
-                        "url": href,
-                    })
-
-            return {
-                "content": content[:5000],
-                "attachments": attachments,
-            }
-        except Exception as e:
-            logger.error(f"IITP 상세 조회 오류 ({announcement_id}): {e}")
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            logger.warning(f"IITP(IRIS) 상세 조회 실패 ({announcement_id}): HTTP {status}")
             return None
-        finally:
-            await page.close()
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"IITP(IRIS) 상세 조회 실패 ({announcement_id}): {type(e).__name__}: {e}")
+            return None
+
+        detail = self.parse_detail_page(response.text)
+        if detail is None:
+            logger.warning(f"IITP(IRIS) 상세 페이지 구조 확인 필요 ({announcement_id}): 공고 본문 영역 없음")
+        return detail
+
+    def parse_detail_page(self, html: str) -> Optional[dict]:
+        """상세 페이지 HTML 파싱 — 공고 영역(.tstyle_view)이 없으면 None"""
+        soup = BeautifulSoup(html, "lxml")
+        view = soup.select_one(".tstyle_view")
+        if view is None:
+            return None
+
+        parts = []
+        # 메타 정보 (소관부처, 전문기관, 공고번호, 공고명, 공고일자, 접수기간 ...)
+        # 사업담당자 연락처(이름·전화번호)는 관련성 판단에 불필요하므로 제외
+        for li in view.select(".title_area ul.list_dot > li"):
+            label = li.find("strong")
+            if label is not None and "연락처" in label.get_text():
+                continue
+            text = re.sub(r"\s+", " ", li.get_text(" ", strip=True))
+            if text:
+                parts.append(text)
+
+        body = view.select_one(".tb_contents .se-contents") or view.select_one(".tb_contents")
+        if body is not None:
+            body_text = _element_text(body)
+            if body_text:
+                parts.append(body_text)
+
+        return {
+            "content": "\n".join(parts)[:5000],
+            "attachments": self._parse_attachments(view),
+        }
+
+    def _parse_attachments(self, view) -> list[dict]:
+        """첨부파일 목록 (공고문 우선 정렬, 파일명은 실제 확장자로 끝남)"""
+        attachments = []
+        seen = set()
+        for link in view.select("a.file_down"):
+            match = DOWNLOAD_JS_PATTERN.search(link.get("href", "") + " " + link.get("onclick", ""))
+            if not match:
+                continue
+            doc_id, file_id, js_name = match.groups()
+            name_elem = link.select_one(".text")
+            name = (name_elem.get_text(strip=True) if name_elem else "") or js_name.strip()
+            if not name or (doc_id, file_id) in seen:
+                continue
+            seen.add((doc_id, file_id))
+            url = f"{self.config['file_download_url']}?{urlencode({'atchDocId': doc_id, 'atchFileId': file_id})}"
+            attachments.append({"name": name, "url": url})
+
+        attachments.sort(key=lambda a: _attachment_priority(a["name"]))
+        return attachments
+
+    async def download_attachment(self, url: str, timeout: int = 30) -> Optional[bytes]:
+        """첨부파일 다운로드 (세션 헤더 사용)"""
+        try:
+            response = self.session.get(
+                url, headers={"Referer": self.config["detail_page_url"]}, timeout=timeout
+            )
+            response.raise_for_status()
+            return response.content
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            logger.warning(f"IITP(IRIS) 첨부파일 다운로드 실패 ({url}): HTTP {status}")
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"IITP(IRIS) 첨부파일 다운로드 실패 ({url}): {type(e).__name__}: {e}")
+        return None
 
     async def close(self):
-        """리소스 정리"""
-        if self.browser:
-            await self.browser.close()
-            self.browser = None
-        if self.playwright:
-            await self.playwright.stop()
-            self.playwright = None
-        logger.info("IITP Playwright 브라우저 종료됨")
+        """세션 종료"""
+        self.session.close()

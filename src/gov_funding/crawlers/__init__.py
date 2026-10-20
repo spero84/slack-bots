@@ -1,33 +1,25 @@
 """크롤러 모듈"""
 from .base_crawler import BaseCrawler
 from .bizinfo_crawler import BizinfoCrawler
-from .nipa_crawler import NipaCrawler
-from .nia_crawler import NiaCrawler
+from .iitp_crawler import IitpCrawler
 from .jointips_crawler import JointipsCrawler
+from .kstartup_crawler import KStartupCrawler
 from .mss_crawler import MssCrawler
+from .nia_crawler import NiaCrawler
+from .nipa_crawler import NipaCrawler
 
 __all__ = [
     "BaseCrawler",
     "BizinfoCrawler",
-    "NipaCrawler",
-    "NiaCrawler",
+    "IitpCrawler",
     "JointipsCrawler",
+    "KStartupCrawler",
     "MssCrawler",
+    "NiaCrawler",
+    "NipaCrawler",
 ]
 
-# Playwright is optional (too large for Lambda zip deployment)
-try:
-    from .kstartup_crawler import KStartupCrawler
-    __all__.append("KStartupCrawler")
-except (ImportError, NameError):
-    pass
-
-try:
-    from .iitp_crawler import IitpCrawler
-    __all__.append("IitpCrawler")
-except (ImportError, NameError):
-    pass
-
+# Playwright는 선택 의존성 (목록 페이지가 JS 렌더링인 MSIT, MOTIE만 사용)
 try:
     from .msit_crawler import MsitCrawler
     __all__.append("MsitCrawler")

@@ -27,9 +27,16 @@ sudo systemctl start|stop|restart <service>  # slack-app, scheduler, gov-funding
 /home/ubuntu/status.sh                       # 전체 상태 확인
 /home/ubuntu/logs.sh <service>               # journalctl -u <service> -f
 
-# 테스트
-source /home/ubuntu/venvs/gov-funding/bin/activate && python -m pytest
-source /home/ubuntu/venvs/ai-news/bin/activate && python -m pytest
+# 테스트 (서비스별 venv에서 해당 디렉토리만)
+/home/ubuntu/venvs/gov-funding/bin/python -m pytest tests/gov_funding
+/home/ubuntu/venvs/ai-news/bin/python -m pytest tests/ai_news
+/home/ubuntu/venvs/slack-app/bin/python -m pytest tests/slack_app
+
+# gov-funding 수동 실행 (스케줄러 없이 1회) — systemd와 달리 .env를 직접 불러와야 한다
+set -a; . ./.env; set +a
+/home/ubuntu/venvs/gov-funding/bin/python -m src.gov_funding.main --dry-run  # 알림/저장 없이 결과 JSON 출력
+/home/ubuntu/venvs/gov-funding/bin/python -m src.gov_funding.main --seed     # 알림 없이 저장만
+/home/ubuntu/venvs/gov-funding/bin/python -m src.gov_funding.main --once     # 실제 1회 실행
 ```
 
 ## Code Conventions
@@ -67,16 +74,27 @@ class BaseCrawler(ABC):
 ```
 
 ### Playwright 크롤러 (optional import)
-```python
-try:
-    from .crawlers import KStartupCrawler
-    KSTARTUP_AVAILABLE = True
-except ImportError:
-    KSTARTUP_AVAILABLE = False
-```
-KStartup, IITP, MSIT, MOTIE 크롤러가 Playwright 의존.
+MSIT, MOTIE의 **목록 페이지만** Playwright를 쓴다 (JS 렌더링). 상세 페이지는 정적 HTML이라 requests로 받고, Playwright는 폴백일 뿐이다. 나머지 크롤러는 전부 requests 기반이다. `crawlers/__init__.py`가 MSIT/MOTIE를 `try/except ImportError`로 import하고, `main.create_crawlers()`는 import되지 않은 크롤러를 경고 후 건너뛴다.
 
-`_init_browser()`는 `self.browser is None`뿐 아니라 `browser.is_connected()`까지 확인해야 한다. chromium 프로세스가 죽으면 객체는 남아있지만 연결이 끊겨, `is None`만 검사하면 죽은 브라우저를 계속 재사용해 이후 상세 페이지 수집이 전부 실패한다 (→ Bedrock이 제목/메타데이터만 보고 판단). 연결이 끊긴 경우 playwright 드라이버는 재사용하고 chromium만 재실행한다.
+- **chromium에 `--single-process`를 절대 넣지 말 것.** 이 모드는 브라우저 수명 동안 페이지(컨텍스트)를 하나만 만들 수 있어 두 번째 `new_page()`에서 chromium이 죽는다 (`Target page, context or browser has been closed`). 2026-09~10월 MSIT 상세 수집이 전부 실패한 원인이었다. `tests/gov_funding/test_playwright_browser.py`가 이 플래그를 검사한다.
+- `_init_browser()`의 `browser.is_connected()` 확인은 안전장치로 유지한다 (죽은 브라우저 재사용 방지).
+
+### 소스별 수집 주의사항 (gov-funding)
+
+크롤러가 0건을 반환해도 파이프라인은 에러 없이 끝나므로 **0건이면 반드시 WARNING**을 남긴다. `main.py`는 0건 소스와 크롤러 예외를 Slack 알림에 `⚠️ 수집 이상`으로 함께 표시한다.
+
+| 소스 | 수집 방식 | 주의 |
+|------|----------|------|
+| 기업마당 | `selectSIIA200View.do?schEndAt=N&cpage=N` HTML | 페이지당 15건 고정(`rows` 무시). 등록일 기준 최근 `lookback_days`(5)일까지 페이지 이동. ID는 href의 `pblancId` (`hashCode=`는 항상 빈 값). 신청기간은 **마지막 날짜**가 마감일 ('2026-10-16 ~ 2026-10-26' → 10-26) |
+| K-Startup | `bizpbanc-ongoing.do?page=N&pbancClssCd=PBC010/PBC020` HTML | 무한 스크롤이 아니라 서버 페이지네이션. `suptReginCdList=LC00,LC01,LC08`(전국/서울/경기). 마감된 공고 상세는 `bizpbanc-deadline.do` |
+| IITP | IRIS `retrieveBsnsAncmBtinSituList.do` (sorgnId=10004) JSON | www.iitp.kr은 robots.txt가 `Disallow: /`이고 목록이 Vue 렌더링이라 IRIS를 쓴다. 접수중(`ancmIng`)+접수예정(`ancmPre`) |
+| JOINTIPS | `jointips.or.kr/api/cms/public/event/list` JSON | 2026-09 CMS 이전으로 옛 `bbs/board.php` 경로는 404 |
+| MSIT | 목록 Playwright, 상세 `view.do?...&bbsSeqNo=100&nttSeqNo=` | `bbsSeqNo=100`이 빠지면 HTTP 200 '시스템 점검 안내' 페이지가 온다. 첨부는 `fn_download()` onclick → `fileDown.do` |
+| MOTIE | 목록 Playwright, 상세 `motir.go.kr/kor/article/ATCL2826a2625/{id}/view` | ID는 게시물 번호만 (공고번호/해시로 대체 금지 — 404 링크·키 변경). 첨부 이름의 ` [178.7 KB]` 제거 |
+| MSS | HTML | 본문은 숨은 `textarea#editContents`(이스케이프된 HTML) |
+| NIA/NIPA | HTML | NIA `span.writer em` 마지막 = 팀명, NIPA 상세는 `table.tb05`의 '내용' 행 |
+
+MSIT/MOTIE/MSS 등 목록에 마감일이 없는 공고는 Bedrock 단계에서 상세/첨부 텍스트로 `utils/deadline_text.parse_deadline_from_text()`가 마감일을 채운다.
 
 ### RSS 소스 주의사항 (ai-news)
 
@@ -94,7 +112,12 @@ HTML 스크래핑보다 RSS가 안정적이다. 실제로 세 소스가 조용�
 - `requests.exceptions.HTTPError`의 상태 코드를 볼 때 `if e.response:`는 쓰지 말 것 — `Response.__bool__`이 4xx/5xx에서 False라 403이 분기를 타지 못한다. `e.response is not None`으로 비교한다.
 
 ### 워크플로우 파이프라인
-- **gov-funding**: crawl → deduplicate → deadline_filter → keyword_filter → bedrock_filter → vector storage(S3 Vectors) → slack/gmail notify
+- **gov-funding**: crawl(소스별 격리) → deduplicate → deadline_filter → keyword_filter → S3 Vectors 조회로 분류(저장된 공고/다른 소스로 저장된 같은 사업/신규) → **신규만** bedrock_filter(상세+첨부, 마감일 추출) → slack/gmail notify → **알림 성공 후** vector upsert
+  - 저장된 공고는 저장된 점수/요약을 재사용하고 Bedrock을 다시 부르지 않는다
+  - 같은 제목(`canon_title`)이 다른 소스/ID로 이미 저장돼 있으면 재알림하지 않는다 (저장 항목이 마감 전이고 최근 60일 안에 수집된 경우만)
+  - Bedrock 탈락 공고는 로컬 캐시(`$GOV_FUNDING_STATE_DIR/rejected.json`, 기본 `/home/ubuntu/.local/state/gov-funding`)에 기록해 마감일까지(마감일 모르면 14~20일) 재분석하지 않는다. 알림은 됐지만 벡터 저장에 실패한 공고도 여기에 기록해 다음 날 재알림을 막는다
+  - 목록에 마감일이 없는 소스(MSIT/MOTIE/NIA 등)는 저장된 마감일(처음 분석 때 첨부에서 추출)을 마감일 필터 전에 복원한다 — 복원하지 않으면 재저장 때 마감일이 지워져 리마인더가 나가지 않는다
+  - 마감 리마인더(D-7, D-3)는 오늘 수집된 저장 공고 + 수집 범위 밖으로 밀려난 저장 공고(저장된 마감일 기준) 대상
 - **ai-news**: crawl → deduplicate → vector_key 비교(신규 식별) → bedrock_summarize → vector storage → slack notify
 
 ### Data Models
@@ -116,7 +139,9 @@ HTML 스크래핑보다 RSS가 안정적이다. 실제로 세 소스가 조용�
 | `relevance_score` | Optional[float] | 관련성 점수 (0-1) |
 | `crawled_at` | datetime | 크롤링 시각 |
 
-Computed fields: `is_deadline_soon` (0 < d_day <= 7), `normalized_title` (공백·특수문자 제거, 소문자)
+Computed fields: `is_deadline_soon` (0 < d_day <= 7), `normalized_title` (= `canon_title(title)`, 중복 체크용)
+
+날짜는 KST 기준이다 (`utils/dates.py`: `now_kst`, `today_kst`, `calculate_d_day`). 서버(EC2) 시간대가 UTC라 naive `datetime.now()`로 D-day를 계산하면 15:00 UTC 이후 실행에서 하루 어긋난다.
 
 #### Article (ai-news)
 | 필드 | 타입 | 설명 |
@@ -146,10 +171,13 @@ Computed fields: `normalized_title` (중복 체크용), `vector_key` (`{source}_
 
 ### Deduplication
 
-**gov-funding** — 소스 우선순위 기반 (`normalized_title` 비교, 첫 번째 일치 항목만 유지):
+**gov-funding** — 소스 우선순위 기반 (`main.CRAWLER_SPECS` 순서):
 ```
 K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 ```
+1. **1차**: `canon_title()`(`storage/models.py`, `Announcement.normalized_title`과 동일) 정확 일치. 가운뎃점 변형(`·ㆍ∙‧`), 'YYYY년도'→'YYYY년', 괄호/따옴표, 앞뒤의 (수정)/(재공고)/(연장)/공고/안내 등을 정규화한다 — 기업마당은 'ㆍ'(U+318D, `\w`에 포함)를 써서 예전 정규화로는 다른 소스와 절대 일치하지 않았다
+2. **2차 (다른 소스끼리만)**: `SequenceMatcher` ≥ 0.90 **그리고** 숫자 토큰 동일(한쪽에만 있는 연도 무시) **그리고** 서로의 단어를 모두 포함. ai-news의 0.6은 여기선 '2차 vs 3차', '공급기업 vs 수요기업', '서류평가 vs 발표평가 결과' 같은 별개 공고를 합치므로 쓰지 않는다
+3. 남기는 쪽이 이미 마감됐고 중복 쪽이 아직 열려 있으면 열린 쪽을 남긴다 (마감 원공고 + 재공고가 둘 다 사라지는 것 방지)
 
 **ai-news** — 2-pass 중복 제거:
 1. **1차**: `normalized_title` 정확 일치 제거
@@ -159,12 +187,14 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 
 | 상황 | 폴백 전략 |
 |------|----------|
-| Bedrock 분석 실패 (gov-funding) | 키워드 필터 결과만 사용 |
-| Bedrock 개별 분석 에러 (gov-funding) | `relevance_score=0.5` 할당 |
+| Bedrock 사용 불가 (gov-funding: 처음 3건 전부 실패, 또는 실패 3건 이상 & 50% 이상) | `BedrockUnavailableError` → 신규 공고 판정 생략(무검증 공고를 보내지 않음), 리마인더는 발송, Slack에 오류 표시 |
+| Bedrock 개별 분석 에러 (gov-funding) | 점수 `None` → 이번 실행에서 제외, 저장/캐시하지 않아 다음 실행에서 재시도 |
 | Vector 키 조회 실패 (ai-news) | 전체 기사를 신규로 처리 |
 | Bedrock 요약 실패 (ai-news) | 요약 없이 전송 |
-| 벡터 저장 실패 (gov-funding) | 모든 공고를 신규로 취급하여 알림 |
-| 크롤러 개별 실패 | 해당 소스 스킵, 나머지 계속 실행 |
+| 벡터 인덱스 조회 실패 (gov-funding) | 신규 판별 불가 → 공고 알림 생략, Slack에 오류만 알림 (전부 신규로 보내면 수십 건 재알림) |
+| Slack 알림 실패 (gov-funding) | 벡터 저장 생략 → 다음 실행에서 신규/리마인더 재발송 |
+| 벡터 저장 일부 실패 (gov-funding) | 나머지 배치는 계속 저장, `VectorUpsertError`로 결과에 기록 |
+| 크롤러 개별 실패 | 해당 소스 스킵(`_safe_crawl`), 나머지 계속 실행, Slack에 `⚠️ 수집 이상` 표시 |
 
 ### Vector Storage (S3 Vectors)
 
@@ -186,8 +216,9 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 | 모델 | `global.anthropic.claude-sonnet-5` | `global.anthropic.claude-sonnet-5` |
 | 리전 | `us-west-2` | `us-west-2` |
 | thinking | `{"type": "disabled"}` | `{"type": "disabled"}` |
-| max_tokens | 500 | 1000 |
-| 임계값 기본값 | 0.6 (관련성) | 0.5 (중요도) |
+| max_tokens | 1024 | 1000 |
+| 응답 형식 | structured outputs (`output_config.format` json_schema) | 자유 JSON |
+| 임계값 기본값 | 0.6 (관련성, 운영 `.env` `RELEVANCE_THRESHOLD=0.7`) | 0.5 (중요도) |
 
 **Sonnet 5 / Opus 5 주의사항:**
 - `temperature`를 보내면 `ValidationException: temperature is deprecated for this model` 발생 — 절대 포함하지 말 것
@@ -196,14 +227,15 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 
 **Bedrock 인증:** 모든 `bedrock-runtime` 클라이언트는 `Config(signature_version="v4")`를 명시한다. `.env`의 `AWS_BEARER_TOKEN_BEDROCK`(Claude CLI용)은 만료될 수 있고, 설정되어 있으면 boto3가 EC2 IAM Role 대신 그 토큰으로 인증을 시도해 InvokeModel이 전부 `AccessDeniedException`으로 실패한다.
 
-**JSON 응답 파싱 (3단계 폴백):** 모델이 항상 유효한 JSON을 주지는 않는다 (요약문 내 이스케이프되지 않은 따옴표, 콤마 누락, 코드펜스). 두 분석기 모두 `extract_json_object()` → `extract_fields_fallback()`(정규식으로 점수/요약만 복구) → `(0.5, None)` 순서로 처리한다. 파싱 실패 시 원문 300자를 로그에 남긴다. 단순 `re.search(r"\{[^{}]+\}")`는 중첩 객체에서도 깨지므로 쓰지 않는다.
+**JSON 응답 파싱:** gov-funding은 structured outputs(`output_config.format` json_schema, min/max 미지원이라 점수는 코드에서 [0,1] clamp)로 유효한 JSON을 받는다. 그래도 폴백은 유지한다: `extract_json_object()` → `extract_fields_fallback()`(정규식으로 점수/요약 복구 — `"reason"` 텍스트가 요약에 섞이지 않게 끊는다) → `(None, None)`(분석 실패). ai-news는 `(0.5, None)`. 파싱 실패 시 원문 300자를 로그에 남긴다. 단순 `re.search(r"\{[^{}]+\}")`는 중첩 객체에서도 깨지므로 쓰지 않는다. 상세/첨부 텍스트와 요약은 `utils/text.clean_text()`로 HTML 태그/엔티티를 제거한다 (MSS 본문의 `&lt;br /&gt;`가 요약에 그대로 옮겨진 적 있음).
 
 ### Slack App Internals
 
 - **세션 관리**: DM = 사용자별 세션, 채널 멘션 = 스레드별 세션
 - **Claude CLI 플래그**: `--session-id` (새 세션) / `--resume` (기존), `--max-turns 25`, `--output-format text`, timeout 600초
 - **Vector 검색**: top_k=5, 결과 부족 시 메타데이터 필터 제거 후 재검색
-  - gov-funding 채널: `announcements` 인덱스, 소스/D-day 필터
+  - gov-funding D-day는 저장된 `d_day`(마지막 저장 시점 값)가 아니라 `deadline`으로 오늘(KST) 기준 계산한다. '임박/곧 마감/이번 주' 질문은 top_k=30으로 검색 후 마감 7일 이내 + 유사도 상위 2건을 남긴다
+  - gov-funding 채널: `announcements` 인덱스, 소스 필터 (마감 임박은 검색 후 마감일로 계산)
   - ai-news 채널: `ainewsarticles` 인덱스, 소스/카테고리 필터
 - **SYSTEM_RULES**: Slack mrkdwn 형식만 사용, 테이블 금지, `*굵게*` 대신 `#` 헤더 금지
 
@@ -270,7 +302,7 @@ slack-bots/
 | 변수 | 설명 | 기본값 |
 |------|------|--------|
 | `AWS_REGION` | AWS 리전 | `ap-northeast-2` |
-| `S3_BUCKET` | S3 버킷 (gov-funding 벡터) | `gov-funding-monitor` |
+| `S3_BUCKET` | S3 Vectors 버킷 (gov-funding 벡터, 운영값 `gov-funding-monitor-snapshots`) | `gov-funding-monitor` |
 | `AI_NEWS_S3_BUCKET` | S3 버킷 (ai-news 벡터) | S3_BUCKET과 동일 |
 | `BEDROCK_REGION` | Bedrock 리전 | `us-west-2` |
 | `BEDROCK_MODEL_ID` | Bedrock 모델 ID (크롤러 분석/요약) | `global.anthropic.claude-sonnet-5` |
@@ -282,7 +314,12 @@ slack-bots/
 | `AI_NEWS_CHANNEL_ID` | AI 뉴스 알림/Q&A 채널 | (필수) |
 | `GMAIL_CREDENTIALS` | Gmail API credentials JSON | (선택) |
 | `EMAIL_RECIPIENTS` | 이메일 수신자 (콤마 구분) | (선택) |
-| `RELEVANCE_THRESHOLD` | Bedrock 관련성 임계값 | `0.6` |
+| `RELEVANCE_THRESHOLD` | Bedrock 관련성 임계값 (운영 `.env` 0.7) | `0.6` |
+| `GOV_FUNDING_RUN_ON_START` | 서비스 시작 시 1회 실행 (신규만 알림) | `1` |
+| `GOV_FUNDING_FORCE_RESEND_ON_START` | 시작 시 기존 공고까지 전부 재발송 | `0` |
+| `GOV_FUNDING_MAX_BEDROCK_CALLS` | 실행당 Bedrock 분석 상한 (초과분은 다음 실행) | `150` |
+| `GOV_FUNDING_STATE_DIR` | Bedrock 탈락 캐시 디렉토리 | `/home/ubuntu/.local/state/gov-funding` |
+| `GOV_FUNDING_RUN_TIMEOUT` | 1회 실행 제한 시간(초) | `7200` |
 | `DEADLINE_ALERT_DAYS` | 마감 알림 기준일 | `7` |
 | `AI_NEWS_IMPORTANCE_THRESHOLD` | AI 뉴스 중요도 임계값 | `0.5` |
 | `AI_NEWS_MAX_PER_SOURCE` | 소스별 최대 기사 수 | `20` |
@@ -294,10 +331,11 @@ slack-bots/
 ## Configuration Constants
 
 ### gov-funding
-- **RELEVANCE_KEYWORDS** (54개): IT/SW (IT, ICT, SW, 디지털, 클라우드, SaaS), AI (AI, 인공지능, 머신러닝, LLM, 생성형), Startup (창업, 스타트업, 벤처, 스케일업), Support (R&D, 연구개발, 바우처, 보조금)
-- **EXCLUDE_KEYWORDS** (26개): 농업, 축산, 수산, 제조업, 건설, 조선, 에너지, 바이오, 관광 등 비IT 분야
-- **ALLOWED_REGIONS** (3개): 서울, 경기, 성남
-- **EXCLUDE_REGIONS** (17개): 부산, 대구, 인천, 광주, 대전, 울산, 세종, 강원 등
+키워드 단계는 넓게 통과시키고 Bedrock이 최종 판단한다 (`analyzers/relevance_filter.py`).
+- **RELEVANCE_KEYWORDS** (53개): IT/SW, AI, 창업/스타트업, 지원(R&D, 바우처 등) + AX, DX, IoT, XR, 반도체, 정보보호/보안 등. 영문 약어는 대소문자 구분 + 앞 글자가 영문이 아닐 때만 (`AICT`, `AIoT`는 통과), IT/SW는 양쪽 경계 (`SWITCH`, `SUMMIT` 오탐 방지)
+- **EXCLUDE_KEYWORDS** (하드) / **SOFT_EXCLUDE_KEYWORDS** (제조, 에너지, 바이오, 물류): 제목에 **STRONG_IT_KEYWORDS**(AI, SW, 데이터, 보안 등)가 있으면 적용하지 않는다 ('AI 제조 혁신' 통과). '제약'→'제약사/제약산업', '조선'→'조선업' (부분 문자열 오탐 방지)
+- **NON_ACTIONABLE_PATTERNS**: 선정/평가 결과, 입법·행정예고, 하위법령 등 신청할 수 없는 공고는 IT 키워드가 있어도 제외. 조달/용역/주관기관 모집/설명회/해외 전시회는 유지
+- **지역** (`classify_region`): ① 소관부처가 광역 지자체면 서울특별시/경기도만 허용 ② 제목 앞 태그(`[경기]`, `(충남)`)는 지역명일 때만 판단 (`[공고]`, `[코리아스타트업포럼]`은 무시) ③ '경기 광주'는 경기 ④ **EXCLUDE_REGIONS**(광역 전체·약칭, 호남권/충청권/대경권 등 권역, 대덕특구, 주요 시)가 있으면 제외 ⑤ **ALLOWED_REGIONS**(서울, 경기, 수도권, 성남, 판교 등)면 허용 ⑥ 지역 정보가 없으면 전국으로 허용. 부분 문자열 함정은 `REGION_ALIAS_PATTERNS`로 처리 (대전환, 부산물, 세종대왕 등). 입찰/조달 공고는 제목 속 지역이 수행 장소라 제목 지역 규칙을 건너뛴다
 - **마감 마일스톤**: `[7, 3]`일 — D-day가 마일스톤을 통과할 때 알림 (예: 이전 D-8 → 현재 D-7)
 
 ### ai-news
@@ -361,17 +399,16 @@ sudo systemctl restart gov-funding       # 개별 재시작
 sudo systemctl stop scheduler            # 개별 중지
 ```
 
-**재시작은 즉시 1회 워크플로우를 실행하고 Slack 알림을 발송한다.** gov-funding `main()`은 `execute_workflow(force_resend=True)`를, ai-news `main()`은 스케줄 등록 후 `execute_workflow()`를 무조건 호출한다. 따라서 두 서비스를 재시작하면 스케줄과 무관하게 채널에 알림이 한 번 더 올라간다 (gov-funding은 `force_resend=True`라 기존 공고까지 재발송). 코드 수정 후 재시작이 필요하면 이 비용을 감안한다.
+**재시작은 즉시 1회 워크플로우를 실행한다.** gov-funding `main()`은 시작 시 `execute_workflow(force_resend=False)`를 호출해 저장된 공고와 비교하므로 **신규 공고만** 알린다 (예전에는 `force_resend=True`라 재시작마다 기존 공고 수십 건을 재발송했다). 시작 실행을 끄려면 `GOV_FUNDING_RUN_ON_START=0`, 기존 공고까지 다시 보내려면 `GOV_FUNDING_FORCE_RESEND_ON_START=1`. 재시작으로 09:00 정각을 놓친 날은 이 시작 실행이 그날 실행을 대신한다 (APScheduler는 재시작 후 지난 시각을 다시 실행하지 않으므로 `GOV_FUNDING_RUN_ON_START=0`이면 그날은 건너뛴다). 1회 실행은 `GOV_FUNDING_RUN_TIMEOUT`(기본 2시간) 안에 끝나지 않으면 중단된다. ai-news `main()`은 스케줄 등록 후 `execute_workflow()`를 무조건 호출하므로 재시작하면 채널에 알림이 한 번 더 올라간다. 코드 수정 후 재시작 전에는 `--dry-run`으로 무엇이 발송될지 먼저 확인한다.
 
 ## Testing
 
 ```bash
-# venv 활성화 후 테스트 실행
-source /home/ubuntu/venvs/gov-funding/bin/activate
-python -m pytest
-
-source /home/ubuntu/venvs/ai-news/bin/activate
-python -m pytest
+# 서비스별 venv로 해당 테스트 디렉토리만 실행 (루트에서 `python -m pytest`를 돌리면
+# 다른 서비스 의존성(feedparser, slack_bolt 등)이 없어 수집 단계에서 실패한다)
+/home/ubuntu/venvs/gov-funding/bin/python -m pytest tests/gov_funding
+/home/ubuntu/venvs/ai-news/bin/python -m pytest tests/ai_news
+/home/ubuntu/venvs/slack-app/bin/python -m pytest tests/slack_app
 
 # 개별 테스트 스크립트
 python scripts/test_bedrock.py   # Bedrock 분석 테스트

@@ -151,16 +151,31 @@ def _parse_hwp_records(data: bytes) -> str:
     return "\n".join(text_parts)
 
 
+# HWP 5.0 PARA_TEXT 제어 문자 (스펙: 문자 컨트롤 / 인라인 컨트롤 / 확장 컨트롤)
+# - 인라인·확장 컨트롤은 8 WCHAR(16바이트)를 차지한다: 코드 1 WCHAR + 컨트롤 ID·파라미터 6 WCHAR + 코드 1 WCHAR.
+#   코드 1-9만 건너뛰고 11/12/14-23(표, 그리기 개체, 각주 등)을 1 WCHAR로 처리하면
+#   나머지 12바이트가 한자로 디코딩되어 '중소湯湷기업' 같은 쓰레기 문자가 섞인다.
+# - 문자 컨트롤(0, 10, 13, 24-31)은 1 WCHAR.
+_HWP_MULTI_WCHAR_CTRL = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, *range(14, 24)})
+_HWP_CTRL_EXTRA_BYTES = 14  # 8 WCHAR 중 코드 자신(2바이트)을 뺀 나머지
+_HWP_CHAR_CTRL_MAP = {
+    9: "\t",    # 탭 (인라인 컨트롤)
+    10: "\n",   # 줄바꿈
+    13: "\n",   # 문단 끝
+    24: "-",    # 하이픈
+    30: " ",    # 묶음 빈칸
+    31: " ",    # 고정폭 빈칸
+}
+
+
 def _extract_text_from_para(record_data: bytes) -> str:
     """PARA_TEXT 레코드에서 텍스트 추출
 
-    UTF-16LE 인코딩, 특수 제어 문자 처리:
-    - 0~31 범위의 유니코드는 HWP 제어 문자
-    - 0x00: 무효
-    - 0x01~0x03: 인라인 컨트롤 (각각 추가 바이트 소비)
-    - 0x04~0x09: 확장 컨트롤 (각각 추가 바이트 소비)
-    - 0x0A: 줄바꿈
-    - 0x0D: 단락 끝
+    UTF-16LE 인코딩. 0~31 범위 코드는 HWP 제어 문자:
+    - 1-9, 11, 12, 14-23: 인라인/확장 컨트롤 (8 WCHAR 차지 → 추가 14바이트 스킵, 9=탭은 '\t')
+    - 10: 줄바꿈, 13: 문단 끝 → '\n'
+    - 24: 하이픈 → '-', 30/31: 묶음/고정폭 빈칸 → ' '
+    - 0, 25-29: 무시 (1 WCHAR)
     """
     chars = []
     i = 0
@@ -170,30 +185,18 @@ def _extract_text_from_para(record_data: bytes) -> str:
         code = struct.unpack_from("<H", record_data, i)[0]
         i += 2
 
-        if code == 0:
-            continue
-        elif code in (1, 2, 3):
-            # 인라인 확장 문자: 추가 바이트 스킵 (각각 다른 크기)
-            i += 14  # 일반적으로 인라인 컨트롤은 추가 14바이트
-            if i > length:
-                break
-        elif 4 <= code <= 9:
-            # 확장 컨트롤: 추가 바이트 스킵
-            i += 14
-            if i > length:
-                break
-        elif code == 10:
-            chars.append("\n")
-        elif code == 13:
-            chars.append("\n")
-        elif code == 24:
-            # 하이픈
-            chars.append("-")
-        elif code < 32:
-            # 기타 제어 문자 무시
-            continue
-        else:
+        if code >= 32:
             chars.append(chr(code))
+            continue
+
+        if code in _HWP_MULTI_WCHAR_CTRL:
+            i += _HWP_CTRL_EXTRA_BYTES
+            if i > length:
+                break
+
+        mapped = _HWP_CHAR_CTRL_MAP.get(code)
+        if mapped:
+            chars.append(mapped)
 
     text = "".join(chars).strip()
     # 연속 빈 줄 정리
@@ -247,6 +250,30 @@ def extract_text_from_hwpx(file_bytes: bytes) -> str:
     return "\n".join(text_parts)
 
 
+# <hp:t> 내부 인라인 요소 → 대체 문자
+_HWPX_INLINE_CHARS = {
+    "lineBreak": "\n",
+    "tab": "\t",
+    "fwSpace": " ",
+    "nbSpace": " ",
+    "hwpSpace": " ",
+}
+
+
+def _hwpx_t_text(elem) -> str:
+    """<hp:t> 요소의 전체 텍스트
+
+    '<hp:t>’26.<hp:fwSpace/>10.29.(목)</hp:t>'처럼 인라인 요소 뒤의 텍스트는 elem.text가 아니라
+    자식 요소의 tail에 들어 있다. elem.text만 쓰면 접수기간 날짜 등이 통째로 빠진다.
+    """
+    parts = [elem.text or ""]
+    for child in elem:
+        if isinstance(child.tag, str):
+            parts.append(_HWPX_INLINE_CHARS.get(etree.QName(child).localname, ""))
+        parts.append(child.tail or "")
+    return "".join(parts)
+
+
 def _parse_hwpx_section(xml_data: bytes) -> str:
     """HWPX section XML에서 텍스트 추출
 
@@ -265,9 +292,9 @@ def _parse_hwpx_section(xml_data: bytes) -> str:
         for elem in root.iter():
             tag = etree.QName(elem.tag).localname if isinstance(elem.tag, str) else ""
 
-            # <t> 태그가 텍스트 노드
-            if tag == "t" and elem.text:
-                text_parts.append(elem.text)
+            # <t> 태그가 텍스트 노드 (내부 인라인 요소 뒤 텍스트는 child.tail에 있다)
+            if tag == "t":
+                text_parts.append(_hwpx_t_text(elem))
             # <linesegarray> 등에서 줄바꿈 처리
             elif tag in ("p", "subList"):
                 text_parts.append("\n")
@@ -283,11 +310,17 @@ def _parse_hwpx_section(xml_data: bytes) -> str:
     return text
 
 
-def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """PDF에서 텍스트 추출 (pdfplumber 사용)
+# PDF는 앞부분만 읽는다 (Bedrock 프롬프트에는 수천 자만 들어가고, 수백 쪽 제안요청서를
+# 전부 파싱하면 1건에 수십 초가 걸린다)
+PDF_MAX_PAGES = 15
+
+
+def extract_text_from_pdf(file_bytes: bytes, max_pages: int = PDF_MAX_PAGES) -> str:
+    """PDF에서 텍스트 추출 (pdfplumber 사용, 앞 max_pages쪽만)
 
     Args:
         file_bytes: PDF 파일 바이트
+        max_pages: 읽을 최대 페이지 수
 
     Returns:
         추출된 텍스트
@@ -298,7 +331,7 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            parts = [page.extract_text() or "" for page in pdf.pages]
+            parts = [page.extract_text() or "" for page in pdf.pages[:max_pages]]
         return "\n".join(parts).strip()
     except Exception as e:
         logger.error(f"PDF 텍스트 추출 오류: {e}")
@@ -331,17 +364,36 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
         return ""
 
 
+# 지원 확장자. 파일명 끝에 크기 표기('공고문.hwpx [178.7 KB]')가 붙어 있어도 인식한다.
+_SUPPORTED_EXT_PATTERN = re.compile(r"\.(hwpx?|pdf|docx)\b")
+
+
+def detect_file_type(filename: Optional[str]) -> Optional[str]:
+    """파일명에서 지원 형식(hwp/hwpx/pdf/docx) 판별
+
+    rsplit('.')은 '공고문.hwpx [178.7 KB]'를 'hwpx [178.7 kb]'로 읽어 파일을 건너뛰므로
+    정규식으로 마지막 지원 확장자를 찾는다.
+
+    Returns:
+        'hwp' | 'hwpx' | 'pdf' | 'docx' 또는 None (미지원)
+    """
+    if not filename:
+        return None
+    matches = _SUPPORTED_EXT_PATTERN.findall(filename.lower())
+    return matches[-1] if matches else None
+
+
 def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
     """파일 확장자에 따라 적절한 텍스트 추출 함수 호출
 
     Args:
         file_bytes: 파일 바이트
-        filename: 파일명 (확장자 판별용)
+        filename: 파일명 (확장자 판별용, 크기 표기 접미사 허용)
 
     Returns:
         추출된 텍스트
     """
-    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    ext = detect_file_type(filename) or ""
 
     if ext == "hwpx":
         return extract_text_from_hwpx(file_bytes)

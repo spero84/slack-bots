@@ -6,8 +6,9 @@ from .models import (
     NotificationPayload,
     Snapshot,
     Source,
+    canon_title,
 )
-from .s3_storage import S3Storage, deduplicate_announcements
+from .s3_storage import S3Storage, TitleMatch, TitleMatcher, deduplicate_announcements, is_similar_title
 from .vector_storage import S3VectorStorage
 
 __all__ = [
@@ -20,4 +21,8 @@ __all__ = [
     "S3Storage",
     "S3VectorStorage",
     "deduplicate_announcements",
+    "canon_title",
+    "is_similar_title",
+    "TitleMatch",
+    "TitleMatcher",
 ]

@@ -61,7 +61,8 @@ def test_invoke_body_omits_temperature_and_disables_thinking(monkeypatch):
 
     assert "temperature" not in captured["body"]
     assert captured["body"]["thinking"] == {"type": "disabled"}
-    assert captured["body"]["max_tokens"] == 500
+    assert captured["body"]["max_tokens"] == 1024
+    assert captured["body"]["output_config"]["format"]["type"] == "json_schema"
 
 
 # --- 응답 파싱 테스트 (thinking 블록 대응) ---
@@ -83,9 +84,9 @@ def test_parse_response_with_leading_thinking_block():
 
 
 def test_parse_response_without_text_block_falls_back():
-    """text 블록이 없으면 기본값(0.5, None)으로 폴백한다"""
+    """text 블록이 없으면 실패(None, None) — 0.5는 임계값 미만이라 조용히 제외됐었다"""
     response = {"content": [{"type": "thinking", "thinking": "..."}]}
-    assert BedrockAnalyzer()._parse_response(response) == (0.5, None)
+    assert BedrockAnalyzer()._parse_response(response) == (None, None)
 
 
 # --- 모델 ID 기본값 테스트 ---
@@ -140,6 +141,6 @@ def test_parse_response_recovers_from_missing_comma():
 
 
 def test_parse_response_unrecoverable_falls_back():
-    """복구 불가한 응답은 (0.5, None)으로 폴백한다"""
+    """복구 불가한 응답은 실패(None, None) — 다음 실행에서 재시도"""
     response = _wrap("죄송하지만 평가할 수 없습니다.")
-    assert BedrockAnalyzer()._parse_response(response) == (0.5, None)
+    assert BedrockAnalyzer()._parse_response(response) == (None, None)
