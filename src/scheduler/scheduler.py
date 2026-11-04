@@ -357,15 +357,15 @@ def run_workflow():
 def main():
     scheduler = BlockingScheduler()
 
-    # 평일 9시부터 2시간 간격 실행 (9, 11, 13, 15, 17시)
+    # 평일 하루 3회 실행 (9, 13, 17시)
     scheduler.add_job(
         run_workflow,
-        CronTrigger(day_of_week='mon-fri', hour='9,11,13,15,17', minute=0, timezone='Asia/Seoul'),
+        CronTrigger(day_of_week='mon-fri', hour='9,13,17', minute=0, timezone='Asia/Seoul'),
         id='hourly_workflow',
-        name='Bi-hourly Task Workflow'
+        name='Daily Task Workflow (3x)'
     )
 
-    logger.info("스케줄러 시작: 평일 9시부터 2시간 간격 (9, 11, 13, 15, 17시)")
+    logger.info("스케줄러 시작: 평일 하루 3회 (9, 13, 17시)")
     logger.info("즉시 1회 테스트 실행...")
     run_workflow()
 

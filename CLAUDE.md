@@ -7,7 +7,7 @@ Slack 기반 업무 자동화 시스템 (정부 지원사업 모니터링, AI �
 | 서비스 | 엔트리포인트 | venv | 스케줄 |
 |--------|-------------|------|--------|
 | slack-app | `src.slack_app.app` | `/home/ubuntu/venvs/slack-app` | 상시 (Socket Mode) |
-| scheduler | `src.scheduler.scheduler` | `/home/ubuntu/venvs/scheduler` | 평일 9,11,13,15,17시 |
+| scheduler | `src.scheduler.scheduler` | `/home/ubuntu/venvs/scheduler` | 평일 9,13,17시 |
 | gov-funding | `src.gov_funding.main` | `/home/ubuntu/venvs/gov-funding` | 매일 9시 |
 | ai-news | `src.ai_news.main` | `/home/ubuntu/venvs/ai-news` | 월/수/금 8시 |
 
@@ -227,6 +227,8 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 
 **Bedrock 인증:** 모든 `bedrock-runtime` 클라이언트는 `Config(signature_version="v4")`를 명시한다. `.env`의 `AWS_BEARER_TOKEN_BEDROCK`(Claude CLI용)은 만료될 수 있고, 설정되어 있으면 boto3가 EC2 IAM Role 대신 그 토큰으로 인증을 시도해 InvokeModel이 전부 `AccessDeniedException`으로 실패한다.
 
+**Claude CLI 인증 (scheduler, slack-app):** `.env`에 `AWS_BEARER_TOKEN_BEDROCK`을 두지 않는다. 없으면 Claude CLI가 EC2 IAM Role(`s7c-shawn-personal-an2-role-slack-bot`)로 인증하고, 이 Role은 `global.anthropic.claude-opus-4-6-v1`와 `ANTHROPIC_SMALL_FAST_MODEL` 호출 권한이 있다. 만료된 토큰이 남아 있으면 CLI가 IAM Role로 넘어가지 않고 `403 authentication_failed`("Please make sure your API Key is valid")를 10회 재시도한 뒤 종료한다. 2026-08-19~10-28 동안 scheduler 일일 보고가 이 문제로 한 번도 나가지 않았다. 증상은 `~/logs/workflow_*.log`의 `api_retry ... authentication_failed`, `Return Code: 1`이다.
+
 **JSON 응답 파싱:** gov-funding은 structured outputs(`output_config.format` json_schema, min/max 미지원이라 점수는 코드에서 [0,1] clamp)로 유효한 JSON을 받는다. 그래도 폴백은 유지한다: `extract_json_object()` → `extract_fields_fallback()`(정규식으로 점수/요약 복구 — `"reason"` 텍스트가 요약에 섞이지 않게 끊는다) → `(None, None)`(분석 실패). ai-news는 `(0.5, None)`. 파싱 실패 시 원문 300자를 로그에 남긴다. 단순 `re.search(r"\{[^{}]+\}")`는 중첩 객체에서도 깨지므로 쓰지 않는다. 상세/첨부 텍스트와 요약은 `utils/text.clean_text()`로 HTML 태그/엔티티를 제거한다 (MSS 본문의 `&lt;br /&gt;`가 요약에 그대로 옮겨진 적 있음).
 
 ### Slack App Internals
@@ -241,7 +243,7 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 
 ### Scheduler Workflow
 
-4단계 워크플로우 (평일 9, 11, 13, 15, 17시, 채널 `C0AEW7LF0RJ`):
+4단계 워크플로우 (평일 9, 13, 17시, 채널 `C0AEW7LF0RJ`):
 
 1. **Notion Kanban 확인** — Shawn이 Assignee/Reviewer인 태스크 (Ready/In Progress/In Review)
 2. **Gmail 확인 및 라벨링** — 최근 1시간 메일, 발신자 기준 자동 라벨링 (회의록, CSP, 청구서, 정부지원사업, VC 등)
@@ -324,7 +326,7 @@ slack-bots/
 | `AI_NEWS_IMPORTANCE_THRESHOLD` | AI 뉴스 중요도 임계값 | `0.5` |
 | `AI_NEWS_MAX_PER_SOURCE` | 소스별 최대 기사 수 | `20` |
 | `CLAUDE_CODE_USE_BEDROCK` | Claude Code Bedrock 사용 | `1` |
-| `AWS_BEARER_TOKEN_BEDROCK` | Bedrock Bearer Token | (필수) |
+| `AWS_BEARER_TOKEN_BEDROCK` | Bedrock Bearer Token — 설정하지 않음 (Claude CLI가 EC2 IAM Role 사용, 위 "Claude CLI 인증" 참고) | (미설정) |
 | `ANTHROPIC_API_PROVIDER` | API 프로바이더 | `bedrock` |
 | `ANTHROPIC_SMALL_FAST_MODEL` | 빠른 모델 ID | (선택) |
 
