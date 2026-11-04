@@ -245,7 +245,7 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 
 4단계 워크플로우 (평일 9, 13, 17시, 채널 `C0AEW7LF0RJ`):
 
-1. **Notion Kanban 확인** — Shawn이 Assignee/Reviewer인 태스크 (Ready/In Progress/In Review)
+1. **Notion Kanban 확인** — Shawn이 Assignee/Reviewer인 태스크 (Ready/In Progress/In Review). 그 밖의 태스크는 보고하지 않는다. 보드별 필터 JSON은 `build_kanban_filter()`가 만들어 프롬프트에 그대로 넣는다. Searchdoc Operation Board의 담당 속성은 `Assign`/`Reviewer`이고, 예전의 `Person` 속성은 삭제됐다. `Person`을 쓰면 400 `validation_error`가 나고, CLI가 담당자 조건을 임의로 바꿔 재조회했다 (2026-10-28~11-04, 리뷰어로만 지정된 태스크 10건 누락)
 2. **Gmail 확인 및 라벨링** — 최근 1시간 메일, 발신자 기준 자동 라벨링 (회의록, CSP, 청구서, 정부지원사업, VC 등)
 3. **메일 초안 작성** — To에 본인 이메일이 직접 포함된 외부 발신 메일만 (절대 전송 금지, 초안만)
 4. **Slack 결과 보고** — Notion 현황 + Gmail 요약 + 초안 목록 + 오늘의 액션 가이드

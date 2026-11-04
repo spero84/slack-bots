@@ -79,6 +79,26 @@ def save_last_run_timestamp():
         logger.error(f"타임스탬프 저장 실패: {e}")
 
 
+SHAWN_NOTION_USER_ID = "20cd872b-594c-810b-9d99-0002e207a7c1"
+KANBAN_ACTIVE_STATUSES = ("Ready (Commit)", "In Progress", "In Review")
+
+
+def build_kanban_filter(people_properties: list[str]) -> str:
+    """Shawn이 people_properties 중 하나에 포함되고 활성 상태인 태스크만 조회하는 Notion 필터 JSON."""
+    return json.dumps({
+        "and": [
+            {"or": [
+                {"property": prop, "people": {"contains": SHAWN_NOTION_USER_ID}}
+                for prop in people_properties
+            ]},
+            {"or": [
+                {"property": "Status", "status": {"equals": status}}
+                for status in KANBAN_ACTIVE_STATUSES
+            ]},
+        ]
+    }, ensure_ascii=False)
+
+
 def build_workflow_prompt(gmail_after_epoch: int) -> str:
     """워크플로우 프롬프트를 Gmail 검색 시간 범위와 함께 동적 생성."""
     after_dt = datetime.fromtimestamp(gmail_after_epoch, tz=KST)
@@ -91,21 +111,27 @@ def build_workflow_prompt(gmail_after_epoch: int) -> str:
 `mcp__notion__API-query-data-source`를 아래 3개 보드에 대해 각각 1회씩, 총 3회 호출한다.
 **다른 보드는 조회하지 않는다. API-post-search로 보드를 찾지 말 것 — ID가 아래에 확정되어 있다.**
 
-Shawn의 Notion user_id: `20cd872b-594c-810b-9d99-0002e207a7c1`
+Shawn의 Notion user_id: `{SHAWN_NOTION_USER_ID}`
+
+**보고 대상은 Shawn이 담당자(`Assign`) 또는 리뷰어(`Reviewer`)인 태스크뿐이다.**
+Shawn이 둘 다 아닌 태스크는 1️⃣ 섹션과 이를 바탕으로 한 4️⃣ 액션 가이드에 절대 넣지 않는다.
 
 **보드마다 속성 이름이 다르다. 아래 표의 속성명을 그대로 사용해야 한다.**
 
-| 보드명 | data_source_id | 담당자 속성 | 마감 속성 |
-|--------|----------------|-------------|-----------|
-| `Kanban : LT Operation` | `24431fc3-cdaa-81da-8b9b-000be37b9905` | `Assign` | `Start & Due Date` |
+| 보드명 | data_source_id | 담당/리뷰어 속성 | 마감 속성 |
+|--------|----------------|------------------|-----------|
+| `Kanban : LT Operation` | `24431fc3-cdaa-81da-8b9b-000be37b9905` | `Assign` (리뷰어 속성 없음) | `Start & Due Date` |
 | `Kanban: Management Support` | `33631fc3-cdaa-8157-b790-000b885efad5` | `Assign`, `Reviewer` | `Deadline` |
-| `Searchdoc Operation Board` | `abc31fc3-cdaa-8318-9439-87d69ae43b48` | `Assign`, `Person` | `Due Date` |
+| `Searchdoc Operation Board` | `abc31fc3-cdaa-8318-9439-87d69ae43b48` | `Assign`, `Reviewer` | `Due Date` (비어 있으면 `Deadline`) |
 
 - **상태값은 정확히 `Ready (Commit)` / `In Progress` / `In Review` 세 가지다.** `Ready`(괄호 없음)는 존재하지 않는 값이므로 사용하면 조회가 실패한다.
-- 담당자 필터는 각 보드의 담당자 속성을 `or`로 묶어 `people.contains`로 지정한다.
-  예시 (Management Support):
-  `{{"and":[{{"or":[{{"property":"Assign","people":{{"contains":"20cd872b-594c-810b-9d99-0002e207a7c1"}}}},{{"property":"Reviewer","people":{{"contains":"20cd872b-594c-810b-9d99-0002e207a7c1"}}}}]}},{{"or":[{{"property":"Status","status":{{"equals":"Ready (Commit)"}}}},{{"property":"Status","status":{{"equals":"In Progress"}}}},{{"property":"Status","status":{{"equals":"In Review"}}}}]}}]}}`
+- **각 보드의 `filter`는 아래 JSON을 그대로 사용한다. 담당/리뷰어 조건을 빼거나 바꾸지 말 것.**
+  - LT Operation: `{build_kanban_filter(["Assign"])}`
+  - Management Support: `{build_kanban_filter(["Assign", "Reviewer"])}`
+  - Searchdoc Operation Board: `{build_kanban_filter(["Assign", "Reviewer"])}`
+- **보고 전 검증:** 결과의 각 태스크마다 위 표의 담당/리뷰어 속성(people 배열)에 Shawn의 user_id가 있는지 확인하고, 없으면 보고에서 제외한다.
 - **조회가 실패하거나 에러가 나면 해당 보드명과 함께 "보드 조회 실패"를 보고서에 명시한다.** 조용히 건너뛰지 말 것.
+  실패했다고 담당/리뷰어 조건을 빼거나 줄여서 다시 조회하지 않는다.
 - **오늘 마감인 태스크는 🔴 긴급으로 강조 표시**
 - 기한 지난 태스크 알림
 

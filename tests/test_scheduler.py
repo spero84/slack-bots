@@ -10,6 +10,8 @@ import pytest
 from src.scheduler.scheduler import (
     DEFAULT_LOOKBACK_SECONDS,
     MAX_LOOKBACK_SECONDS,
+    SHAWN_NOTION_USER_ID,
+    build_kanban_filter,
     build_workflow_prompt,
     load_last_run_timestamp,
     save_last_run_timestamp,
@@ -211,10 +213,30 @@ class TestKanbanBoardScope:
         assert "20cd872b-594c-810b-9d99-0002e207a7c1" in prompt
 
     def test_보드별_담당자_속성명_포함(self):
-        """보드마다 다른 담당자 속성명이 모두 명시되는지 확인."""
+        """보드마다 다른 담당/리뷰어 속성명이 명시되고, 없어진 Person 속성은 쓰지 않는지 확인."""
         prompt = build_workflow_prompt(1740000000)
-        assert "Reviewer" in prompt  # Management Support 전용
-        assert "Person" in prompt    # Searchdoc Operation 전용
+        assert "| `Kanban: Management Support` | `33631fc3-cdaa-8157-b790-000b885efad5` | `Assign`, `Reviewer` |" in prompt
+        assert "| `Searchdoc Operation Board` | `abc31fc3-cdaa-8318-9439-87d69ae43b48` | `Assign`, `Reviewer` |" in prompt
+        # Searchdoc Operation Board에는 Person 속성이 없다 (쓰면 400 validation_error)
+        assert "Person" not in prompt
+
+    def test_보드별_필터_JSON_그대로_제공(self):
+        """3개 보드의 필터 JSON이 그대로 쓸 수 있는 형태로 포함되는지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert f"LT Operation: `{build_kanban_filter(['Assign'])}`" in prompt
+        assert f"Management Support: `{build_kanban_filter(['Assign', 'Reviewer'])}`" in prompt
+        assert f"Searchdoc Operation Board: `{build_kanban_filter(['Assign', 'Reviewer'])}`" in prompt
+
+    def test_담당_리뷰어_아닌_태스크_제외_지시(self):
+        """Shawn이 담당/리뷰어가 아닌 태스크를 보고에서 제외하라는 지시가 포함되는지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert "보고 대상은 Shawn이 담당자(`Assign`) 또는 리뷰어(`Reviewer`)인 태스크뿐이다" in prompt
+        assert "없으면 보고에서 제외한다" in prompt
+
+    def test_조회_실패시_담당자_조건_유지_지시(self):
+        """조회 실패 시 담당/리뷰어 조건을 빼고 재조회하지 말라는 지시가 포함되는지 확인."""
+        prompt = build_workflow_prompt(1740000000)
+        assert "담당/리뷰어 조건을 빼거나 줄여서 다시 조회하지 않는다" in prompt
 
     def test_보드별_마감_속성명_포함(self):
         """보드마다 다른 마감일 속성명이 모두 명시되는지 확인."""
@@ -245,3 +267,32 @@ class TestKanbanBoardScope:
         """보드 조회 실패 시 보고서에 명시하라는 지시가 포함되는지 확인."""
         prompt = build_workflow_prompt(1740000000)
         assert "보드 조회 실패" in prompt
+
+
+class TestBuildKanbanFilter:
+    """build_kanban_filter 함수 테스트"""
+
+    def test_유효한_JSON(self):
+        """반환값이 유효한 JSON인지 확인."""
+        assert isinstance(json.loads(build_kanban_filter(["Assign", "Reviewer"])), dict)
+
+    def test_담당_리뷰어_people_contains_or_조건(self):
+        """지정한 속성마다 Shawn user_id로 people.contains 조건을 or로 묶는지 확인."""
+        f = json.loads(build_kanban_filter(["Assign", "Reviewer"]))
+        assert f["and"][0] == {"or": [
+            {"property": "Assign", "people": {"contains": SHAWN_NOTION_USER_ID}},
+            {"property": "Reviewer", "people": {"contains": SHAWN_NOTION_USER_ID}},
+        ]}
+
+    def test_LT_Operation_Assign만(self):
+        """리뷰어 속성이 없는 보드는 Assign 조건만 들어가는지 확인."""
+        f = json.loads(build_kanban_filter(["Assign"]))
+        assert f["and"][0] == {"or": [
+            {"property": "Assign", "people": {"contains": SHAWN_NOTION_USER_ID}},
+        ]}
+
+    def test_활성_상태_3개(self):
+        """상태 조건이 Ready (Commit) / In Progress / In Review 세 가지인지 확인."""
+        f = json.loads(build_kanban_filter(["Assign"]))
+        statuses = [c["status"]["equals"] for c in f["and"][1]["or"]]
+        assert statuses == ["Ready (Commit)", "In Progress", "In Review"]
