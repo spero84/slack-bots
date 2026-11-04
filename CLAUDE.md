@@ -31,6 +31,10 @@ sudo systemctl start|stop|restart <service>  # slack-app, scheduler, gov-funding
 /home/ubuntu/venvs/gov-funding/bin/python -m pytest tests/gov_funding
 /home/ubuntu/venvs/ai-news/bin/python -m pytest tests/ai_news
 /home/ubuntu/venvs/slack-app/bin/python -m pytest tests/slack_app
+/home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py
+
+# scheduler 메일 자동 정리 미리보기 (지우지 않고 대상만 JSON 출력)
+/home/ubuntu/venvs/scheduler/bin/python -m src.scheduler.mail_cleanup --hours 72 --dry-run
 
 # gov-funding 수동 실행 (스케줄러 없이 1회) — systemd와 달리 .env를 직접 불러와야 한다
 set -a; . ./.env; set +a
@@ -247,6 +251,10 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 
 1. **Notion Kanban 확인** — Shawn이 Assignee/Reviewer인 태스크 (Ready/In Progress/In Review). 그 밖의 태스크는 보고하지 않는다. 보드별 필터 JSON은 `build_kanban_filter()`가 만들어 프롬프트에 그대로 넣는다. Searchdoc Operation Board의 담당 속성은 `Assign`/`Reviewer`이고, 예전의 `Person` 속성은 삭제됐다. `Person`을 쓰면 400 `validation_error`가 나고, CLI가 담당자 조건을 임의로 바꿔 재조회했다 (2026-10-28~11-04, 리뷰어로만 지정된 태스크 16건 중 9건 누락)
 2. **Gmail 확인 및 라벨링** — 최근 1시간 메일, 발신자 기준 자동 라벨링 (회의록, CSP, 청구서, 정부지원사업, VC 등)
+   - **메일 자동 정리**: Claude 실행 전에 `mail_cleanup.cleanup_mailbox()`가 지난 실행 이후(최대 72시간) 메일 중 광고(제목 맨 앞 `(광고)`/`[광고]`), 미팅 거절(`거절함:`/`거절됨:`/`Declined:`), GitHub 알림(`notifications@github.com`), 보안 알림(Google `보안 알림`/`Security alert`, AWS Control Tower `aws-controltower-AggregateSecurityNotifications`)을 휴지통으로 옮긴다. Gmail 검색어로 찾은 뒤 발신자·제목·수신 시각을 코드에서 다시 확인한다. 별표/보낸/임시보관 메일은 지우지 않는다. Google `중요 보안 알림`과 `noreply@github.com`(인증 코드 등)도 남긴다
+   - 삭제를 Claude에 맡기지 않는 이유: Claude가 프롬프트의 `after:` 값을 2024년 기준으로 재계산해 검색한 적이 있다 (2026-11-03~04 4회 중 3회). 같은 방식으로 지우면 범위 밖의 오래된 메일까지 지워진다
+   - Gmail 프로모션 탭 메일은 정부기관 안내·서비스 공지도 섞여 있어 일괄 삭제하지 않는다. 후보 목록(ID 포함)을 프롬프트에 넣고, Claude는 그 목록 안의 광고만 `TRASH` 라벨로 옮길 수 있다
+   - 인증은 gmail-mcp-server의 OAuth 토큰(`GMAIL_MCP_CREDENTIALS_PATH`, `GMAIL_MCP_TOKEN_PATH`)을 재사용한다. 정리가 실패해도 보고는 나가고, 2️⃣ Gmail 섹션에 오류가 표시된다
 3. **메일 초안 작성** — To에 본인 이메일이 직접 포함된 외부 발신 메일만 (절대 전송 금지, 초안만)
 4. **Slack 결과 보고** — Notion 현황 + Gmail 요약 + 초안 목록 + 오늘의 액션 가이드
 
@@ -315,6 +323,8 @@ slack-bots/
 | `GOV_FUNDING_CHANNEL_ID` | gov-funding Q&A 채널 | SLACK_CHANNEL_ID와 동일 |
 | `AI_NEWS_CHANNEL_ID` | AI 뉴스 알림/Q&A 채널 | (필수) |
 | `GMAIL_CREDENTIALS` | Gmail API credentials JSON | (선택) |
+| `GMAIL_MCP_CREDENTIALS_PATH` | scheduler 메일 자동 정리용 OAuth 클라이언트 | `/home/ubuntu/mcp/gmail-mcp-server/credentials.json` |
+| `GMAIL_MCP_TOKEN_PATH` | scheduler 메일 자동 정리용 OAuth 토큰 (refresh token 사용) | `/home/ubuntu/mcp/gmail-mcp-server/gmail_token.json` |
 | `EMAIL_RECIPIENTS` | 이메일 수신자 (콤마 구분) | (선택) |
 | `RELEVANCE_THRESHOLD` | Bedrock 관련성 임계값 (운영 `.env` 0.7) | `0.6` |
 | `GOV_FUNDING_RUN_ON_START` | 서비스 시작 시 1회 실행 (신규만 알림) | `1` |
@@ -411,6 +421,7 @@ sudo systemctl stop scheduler            # 개별 중지
 /home/ubuntu/venvs/gov-funding/bin/python -m pytest tests/gov_funding
 /home/ubuntu/venvs/ai-news/bin/python -m pytest tests/ai_news
 /home/ubuntu/venvs/slack-app/bin/python -m pytest tests/slack_app
+/home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py
 
 # 개별 테스트 스크립트
 python scripts/test_bedrock.py   # Bedrock 분석 테스트

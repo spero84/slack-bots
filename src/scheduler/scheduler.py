@@ -6,9 +6,14 @@ import logging
 import os
 import json
 import time
+from collections import Counter
 from datetime import datetime, timezone, timedelta
+from email.utils import parseaddr
+from typing import Optional
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
+
+from src.scheduler.mail_cleanup import CATEGORIES, CleanupResult, cleanup_mailbox
 
 # 로그 디렉토리 생성 (환경에 따라 자동 설정)
 HOME_DIR = os.environ.get("HOME", "/home/ec2-user")
@@ -99,8 +104,33 @@ def build_kanban_filter(people_properties: list[str]) -> str:
     }, ensure_ascii=False)
 
 
-def build_workflow_prompt(gmail_after_epoch: int) -> str:
-    """워크플로우 프롬프트를 Gmail 검색 시간 범위와 함께 동적 생성."""
+def build_mail_cleanup_summary(cleanup: Optional[CleanupResult]) -> str:
+    """scheduler가 미리 휴지통으로 옮긴 메일 결과를 프롬프트용 텍스트로 정리."""
+    if cleanup is None:
+        return "- 자동 정리를 실행하지 않았다."
+    counts = " · ".join(f"{c} {len(cleanup.trashed.get(c, []))}건" for c in CATEGORIES)
+    lines = [f"- 휴지통 이동 {cleanup.total_trashed}건 — {counts}"]
+    security = Counter(
+        f"{parseaddr(item['from'])[0] or parseaddr(item['from'])[1]}: {item['subject']}"
+        for item in cleanup.trashed.get("보안 알림", [])
+    )
+    if security:
+        lines.append("- 보안 알림 발신자/제목별: "
+                     + ", ".join(f"{key} {n}건" for key, n in security.most_common()))
+    if cleanup.errors:
+        lines.append("- 오류: " + "; ".join(cleanup.errors))
+    return "\n".join(lines)
+
+
+def build_promotion_candidates(cleanup: Optional[CleanupResult]) -> str:
+    """Claude가 광고 여부를 판단할 프로모션 탭 메일 목록 (이 목록 안에서만 휴지통 이동 허용)."""
+    if cleanup is None or not cleanup.promotions:
+        return "(없음)"
+    return "\n".join(f"- `{p['id']}` · {p['from']} · {p['subject']}" for p in cleanup.promotions)
+
+
+def build_workflow_prompt(gmail_after_epoch: int, cleanup: Optional[CleanupResult] = None) -> str:
+    """워크플로우 프롬프트를 Gmail 검색 시간 범위, 메일 자동 정리 결과와 함께 동적 생성."""
     after_dt = datetime.fromtimestamp(gmail_after_epoch, tz=KST)
     after_str = after_dt.strftime("%Y-%m-%d %H:%M KST")
 
@@ -136,6 +166,17 @@ Shawn이 둘 다 아닌 태스크는 1️⃣ 섹션과 이를 바탕으로 한 4
 - 기한 지난 태스크 알림
 
 ## 2단계: Gmail 확인 및 라벨링
+### 불필요한 메일 정리 (휴지통 이동)
+광고, 미팅 거절, GitHub 알림, 보안 알림은 scheduler가 이 워크플로우 시작 전에 이미 휴지통으로 옮겼다. 결과:
+{build_mail_cleanup_summary(cleanup)}
+- 휴지통으로 옮긴 메일은 검색되지 않으며 라벨링·요약·초안·액션 가이드 대상이 아니다. 다시 처리하지 않는다.
+- **추가로 휴지통으로 옮길 수 있는 메일은 아래 프로모션 후보 목록에 있는 것뿐이다.** 목록에 없는 메일은 어떤 이유로도 휴지통으로 옮기지 않는다.
+- 목록의 메일 중 제품·서비스·행사 홍보나 영업 목적의 광고만 `mcp__gmail__gmail_modify_labels`에 `add_labels: ["TRASH"]`를 지정해 휴지통으로 옮긴다.
+- 정부기관·지원사업 안내, 고객·파트너·투자사와 주고받는 메일, 청구서·결제, 서비스 변경·종료 공지, 행사 등록 확인·티켓, 채용 관련 메일은 광고가 아니므로 남긴다.
+
+프로모션 후보 ({after_str} 이후, Gmail 프로모션 탭):
+{build_promotion_candidates(cleanup)}
+
 MCP gmail 도구(mcp__gmail__*)를 직접 호출하여:
 - {after_str} 이후 새 메일 검색 (after:{gmail_after_epoch})
 - 중요 메일 필터링 (is:important)
@@ -257,6 +298,10 @@ MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **전용
 > 📩 *메일 제목 2* — 발신자명
 >     라벨: `뉴스레터` · 읽음
 
+마지막 줄에 메일 정리 결과를 한 줄로 표시 (프로모션 후보에서 휴지통으로 옮긴 광고는 광고 건수에 더한다):
+> 🗑️ 휴지통 이동 12건 — 광고 2 · 미팅 거절 0 · GitHub 알림 8 · 보안 알림 2 (Google 보안 알림 1, AWS Config Rules Compliance Change 1)
+보안 알림은 발신자/제목별 건수를 괄호로 덧붙인다. 정리 오류가 있으면 "⚠️ 메일 자동 정리 오류: ..."를 다음 줄에 표시한다.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
 *3️⃣ 메일 초안*
@@ -315,7 +360,15 @@ def run_workflow():
     """Claude CLI로 워크플로우 실행 (실시간 로그)"""
     gmail_after_epoch = int(load_last_run_timestamp())
     save_last_run_timestamp()
-    prompt = build_workflow_prompt(gmail_after_epoch)
+
+    # 삭제는 Claude에 맡기지 않는다 (Claude가 after: 값을 임의로 재계산한 적이 있음)
+    try:
+        cleanup = cleanup_mailbox(gmail_after_epoch)
+    except Exception as e:  # 인증/네트워크 실패여도 일일 보고는 보낸다
+        logger.error(f"메일 자동 정리 실패: {e}")
+        cleanup = CleanupResult.failed(f"메일 자동 정리 실패: {e}")
+
+    prompt = build_workflow_prompt(gmail_after_epoch, cleanup)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     detail_log = os.path.join(LOG_DIR, f"workflow_{timestamp}.log")
