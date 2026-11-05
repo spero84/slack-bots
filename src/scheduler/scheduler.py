@@ -13,6 +13,7 @@ from typing import Optional
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from src.scheduler.kanban import build_kanban_section, kanban_failure_section
 from src.scheduler.mail_cleanup import CATEGORIES, CleanupResult, cleanup_mailbox
 
 # 로그 디렉토리 생성 (환경에 따라 자동 설정)
@@ -84,26 +85,6 @@ def save_last_run_timestamp():
         logger.error(f"타임스탬프 저장 실패: {e}")
 
 
-SHAWN_NOTION_USER_ID = "20cd872b-594c-810b-9d99-0002e207a7c1"
-KANBAN_ACTIVE_STATUSES = ("Ready (Commit)", "In Progress", "In Review")
-
-
-def build_kanban_filter(people_properties: list[str]) -> str:
-    """Shawn이 people_properties 중 하나에 포함되고 활성 상태인 태스크만 조회하는 Notion 필터 JSON."""
-    return json.dumps({
-        "and": [
-            {"or": [
-                {"property": prop, "people": {"contains": SHAWN_NOTION_USER_ID}}
-                for prop in people_properties
-            ]},
-            {"or": [
-                {"property": "Status", "status": {"equals": status}}
-                for status in KANBAN_ACTIVE_STATUSES
-            ]},
-        ]
-    }, ensure_ascii=False)
-
-
 def build_mail_cleanup_summary(cleanup: Optional[CleanupResult]) -> str:
     """scheduler가 미리 휴지통으로 옮긴 메일 결과를 프롬프트용 텍스트로 정리."""
     if cleanup is None:
@@ -129,41 +110,28 @@ def build_promotion_candidates(cleanup: Optional[CleanupResult]) -> str:
     return "\n".join(f"- `{p['id']}` · {p['from']} · {p['subject']}" for p in cleanup.promotions)
 
 
-def build_workflow_prompt(gmail_after_epoch: int, cleanup: Optional[CleanupResult] = None) -> str:
-    """워크플로우 프롬프트를 Gmail 검색 시간 범위, 메일 자동 정리 결과와 함께 동적 생성."""
+def build_workflow_prompt(gmail_after_epoch: int, cleanup: Optional[CleanupResult] = None,
+                          kanban_section: Optional[str] = None) -> str:
+    """워크플로우 프롬프트를 Gmail 검색 시간 범위, 메일 자동 정리 결과, Kanban 섹션과 함께 동적 생성."""
+    if kanban_section is None:
+        kanban_section = kanban_failure_section("Kanban 섹션이 생성되지 않았다")
     after_dt = datetime.fromtimestamp(gmail_after_epoch, tz=KST)
     after_str = after_dt.strftime("%Y-%m-%d %H:%M KST")
 
     return f"""
 다음 워크플로우를 순서대로 실행해주세요. 반드시 MCP 도구를 호출하여 최신 데이터를 조회하고, 4단계까지 모두 완료하세요.
 
-## 1단계: Notion Kanban 확인
-`mcp__notion__API-query-data-source`를 아래 3개 보드에 대해 각각 1회씩, 총 3회 호출한다.
-**다른 보드는 조회하지 않는다. API-post-search로 보드를 찾지 말 것 — ID가 아래에 확정되어 있다.**
+## 1단계: Notion Kanban (scheduler가 이미 조회함)
+Notion Kanban 3개 보드(LT Operation, Management Support, Searchdoc Operation)는 scheduler가 이 워크플로우 시작 전에
+Notion API로 조회했고, Shawn이 담당(`Assign`) 또는 리뷰어(`Reviewer`)인 태스크만 골라 아래 `<kanban_section>`을 만들었다.
+- **Notion을 다시 조회하지 않는다.** `mcp__notion__*` 도구를 호출하지 말 것.
+- 4단계 보고서의 1️⃣ 섹션에는 `<kanban_section>` 내용을 **한 글자도 바꾸지 말고 그대로** 넣는다. 태그(`<kanban_section>`)는 넣지 않는다.
+- 태스크를 추가·삭제·수정·재정렬하지 않는다. 각 줄 맨 앞의 `` `Part` ``와 `역할:` 표시도 그대로 둔다.
+- 4️⃣ 액션 가이드에서도 이 섹션에 있는 태스크만 언급한다.
 
-Shawn의 Notion user_id: `{SHAWN_NOTION_USER_ID}`
-
-**보고 대상은 Shawn이 담당자(`Assign`) 또는 리뷰어(`Reviewer`)인 태스크뿐이다.**
-Shawn이 둘 다 아닌 태스크는 1️⃣ 섹션과 이를 바탕으로 한 4️⃣ 액션 가이드에 절대 넣지 않는다.
-
-**보드마다 속성 이름이 다르다. 아래 표의 속성명을 그대로 사용해야 한다.**
-
-| 보드명 | data_source_id | 담당/리뷰어 속성 | 마감 속성 |
-|--------|----------------|------------------|-----------|
-| `Kanban : LT Operation` | `24431fc3-cdaa-81da-8b9b-000be37b9905` | `Assign` (리뷰어 속성 없음) | `Start & Due Date` |
-| `Kanban: Management Support` | `33631fc3-cdaa-8157-b790-000b885efad5` | `Assign`, `Reviewer` | `Deadline` |
-| `Searchdoc Operation Board` | `abc31fc3-cdaa-8318-9439-87d69ae43b48` | `Assign`, `Reviewer` | `Due Date` (비어 있으면 `Deadline`) |
-
-- **상태값은 정확히 `Ready (Commit)` / `In Progress` / `In Review` 세 가지다.** `Ready`(괄호 없음)는 존재하지 않는 값이므로 사용하면 조회가 실패한다.
-- **각 보드의 `filter`는 아래 JSON을 그대로 사용한다. 담당/리뷰어 조건을 빼거나 바꾸지 말 것.**
-  - LT Operation: `{build_kanban_filter(["Assign"])}`
-  - Management Support: `{build_kanban_filter(["Assign", "Reviewer"])}`
-  - Searchdoc Operation Board: `{build_kanban_filter(["Assign", "Reviewer"])}`
-- **보고 전 검증:** 결과의 각 태스크마다 위 표의 담당/리뷰어 속성(people 배열)에 Shawn의 user_id가 있는지 확인하고, 없으면 보고에서 제외한다.
-- **조회가 실패하거나 에러가 나면 해당 보드명과 함께 "보드 조회 실패"를 보고서에 명시한다.** 조용히 건너뛰지 말 것.
-  실패했다고 담당/리뷰어 조건을 빼거나 줄여서 다시 조회하지 않는다.
-- **오늘 마감인 태스크는 🔴 긴급으로 강조 표시**
-- 기한 지난 태스크 알림
+<kanban_section>
+{kanban_section}
+</kanban_section>
 
 ## 2단계: Gmail 확인 및 라벨링
 ### 불필요한 메일 정리 (휴지통 이동)
@@ -258,8 +226,8 @@ MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **전용
 
 ✅ GOOD (이렇게 써야 Slack에서 정상 표시):
 *`In Progress` (2건)*
-> • *태스크 A* — 보드: LT Operation · 마감: 2025-02-12
-> • *태스크 B* — 보드: Management Support · 마감: 2025-02-13
+> • `Product` *태스크 A* — 보드: Searchdoc Operation · 역할: 담당 · 마감: 2025-02-12
+> • `인사 업무` *태스크 B* — 보드: Management Support · 역할: 리뷰 · 마감: 2025-02-13
 
 보고서 전체 구조 (아래 순서와 형식을 정확히 따를 것):
 
@@ -268,24 +236,7 @@ MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **전용
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-*1️⃣ Notion Kanban 태스크 현황*
-⚠️ 절대 테이블 형식 사용 금지. 반드시 아래 불릿 포인트 형식으로 표시.
-⚠️ 보드는 `LT Operation` / `Management Support` / `Searchdoc Operation` 3개만 표기한다.
-상태별로 그룹화하여 표시:
-
-*`In Progress` (3건)*
-> • *태스크 제목* — 보드: LT Operation · 마감: 2025-02-12
-> • *태스크 제목* — 보드: Management Support · 마감: 2025-02-13
-
-*`Ready (Commit)` (2건)*
-> • *태스크 제목* — 보드: Searchdoc Operation · 마감: 2025-02-15
-
-🔴 *긴급/기한 초과*
-> • 🚨 *긴급 태스크 제목* — 마감: *오늘* · 보드: LT Operation
-> • ⚠️ *기한 초과 태스크 제목* — 마감: 2025-02-09 (*2일 초과*) · 보드: Searchdoc Operation
-
-⚠️ 조회 실패한 보드가 있으면 아래처럼 명시:
-> ⚠️ *Management Support* — 보드 조회 실패
+(1단계의 `<kanban_section>` 내용을 그대로 넣는다)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -368,7 +319,14 @@ def run_workflow():
         logger.error(f"메일 자동 정리 실패: {e}")
         cleanup = CleanupResult.failed(f"메일 자동 정리 실패: {e}")
 
-    prompt = build_workflow_prompt(gmail_after_epoch, cleanup)
+    # Kanban 섹션도 코드로 만든다 (Claude가 조회하면 담당/리뷰어 필터·결과 해석이 실행마다 달랐음)
+    try:
+        kanban_section = build_kanban_section()
+    except Exception as e:  # 토큰 없음 등 — 보고는 계속 보낸다
+        logger.error(f"Notion Kanban 섹션 생성 실패: {e}")
+        kanban_section = kanban_failure_section(str(e))
+
+    prompt = build_workflow_prompt(gmail_after_epoch, cleanup, kanban_section)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     detail_log = os.path.join(LOG_DIR, f"workflow_{timestamp}.log")

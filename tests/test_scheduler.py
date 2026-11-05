@@ -10,8 +10,6 @@ import pytest
 from src.scheduler.scheduler import (
     DEFAULT_LOOKBACK_SECONDS,
     MAX_LOOKBACK_SECONDS,
-    SHAWN_NOTION_USER_ID,
-    build_kanban_filter,
     build_workflow_prompt,
     load_last_run_timestamp,
     save_last_run_timestamp,
@@ -174,7 +172,7 @@ class TestBuildWorkflowPrompt:
     def test_워크플로우_4단계_모두_포함(self):
         """프롬프트에 4단계가 모두 포함되는지 확인."""
         prompt = build_workflow_prompt(1740000000)
-        assert "1단계: Notion Kanban 확인" in prompt
+        assert "1단계: Notion Kanban" in prompt
         assert "2단계: Gmail 확인 및 라벨링" in prompt
         assert "3단계: 메일 초안 작성" in prompt
         assert "4단계: 결과 보고" in prompt
@@ -190,109 +188,38 @@ class TestBuildWorkflowPrompt:
         assert isinstance(prompt, str)
 
 
-class TestKanbanBoardScope:
-    """1단계 Notion Kanban 조회 대상 보드 테스트"""
+class TestKanbanPromptIntegration:
+    """1단계: scheduler가 만든 Kanban 섹션을 Claude가 그대로 넣도록 하는 프롬프트 테스트"""
 
-    def test_대상_3개_보드_모두_명시(self):
-        """조회 대상 3개 보드명이 프롬프트에 포함되는지 확인."""
-        prompt = build_workflow_prompt(1740000000)
-        assert "Kanban : LT Operation" in prompt
-        assert "Kanban: Management Support" in prompt
-        assert "Searchdoc Operation Board" in prompt
+    SECTION = ("*1️⃣ Notion Kanban 태스크 현황* (총 1건)\n"
+               "> • `Product` *SaaS 가격 체계 정립* — 보드: Searchdoc Operation · 역할: 리뷰 · 마감: 없음")
 
-    def test_3개_보드_data_source_id_포함(self):
-        """3개 보드의 확정된 data_source_id가 모두 포함되는지 확인."""
-        prompt = build_workflow_prompt(1740000000)
-        assert "24431fc3-cdaa-81da-8b9b-000be37b9905" in prompt  # LT Operation
-        assert "33631fc3-cdaa-8157-b790-000b885efad5" in prompt  # Management Support
-        assert "abc31fc3-cdaa-8318-9439-87d69ae43b48" in prompt  # Searchdoc Operation
+    def test_섹션이_그대로_포함(self):
+        prompt = build_workflow_prompt(1740000000, kanban_section=self.SECTION)
+        assert f"<kanban_section>\n{self.SECTION}\n</kanban_section>" in prompt
 
-    def test_Shawn_user_id_포함(self):
-        """담당자 필터용 Shawn의 Notion user_id가 포함되는지 확인."""
-        prompt = build_workflow_prompt(1740000000)
-        assert "20cd872b-594c-810b-9d99-0002e207a7c1" in prompt
+    def test_Notion_재조회_금지_지시(self):
+        prompt = build_workflow_prompt(1740000000, kanban_section=self.SECTION)
+        assert "Notion을 다시 조회하지 않는다" in prompt
+        assert "한 글자도 바꾸지 말고 그대로" in prompt
+        assert "태스크를 추가·삭제·수정·재정렬하지 않는다" in prompt
 
-    def test_보드별_담당자_속성명_포함(self):
-        """보드마다 다른 담당/리뷰어 속성명이 명시되고, 없어진 Person 속성은 쓰지 않는지 확인."""
-        prompt = build_workflow_prompt(1740000000)
-        assert "| `Kanban: Management Support` | `33631fc3-cdaa-8157-b790-000b885efad5` | `Assign`, `Reviewer` |" in prompt
-        assert "| `Searchdoc Operation Board` | `abc31fc3-cdaa-8318-9439-87d69ae43b48` | `Assign`, `Reviewer` |" in prompt
-        # Searchdoc Operation Board에는 Person 속성이 없다 (쓰면 400 validation_error)
+    def test_담당_리뷰어_기준_명시(self):
+        prompt = build_workflow_prompt(1740000000, kanban_section=self.SECTION)
+        assert "Shawn이 담당(`Assign`) 또는 리뷰어(`Reviewer`)인 태스크만" in prompt
+
+    def test_이전_조회_지시_제거(self):
+        """Claude가 직접 Notion을 조회하던 지시(필터 JSON, 속성 표)가 남아있지 않은지 확인."""
+        prompt = build_workflow_prompt(1740000000, kanban_section=self.SECTION)
+        assert "API-query-data-source" not in prompt
+        assert "people" not in prompt
         assert "Person" not in prompt
 
-    def test_보드별_필터_JSON_그대로_제공(self):
-        """3개 보드의 필터 JSON이 그대로 쓸 수 있는 형태로 포함되는지 확인."""
+    def test_보고서_1번_섹션은_kanban_section_사용(self):
+        prompt = build_workflow_prompt(1740000000, kanban_section=self.SECTION)
+        report = prompt[prompt.index("보고서 전체 구조"):]
+        assert "(1단계의 `<kanban_section>` 내용을 그대로 넣는다)" in report
+
+    def test_섹션_없으면_실패_표시(self):
         prompt = build_workflow_prompt(1740000000)
-        assert f"LT Operation: `{build_kanban_filter(['Assign'])}`" in prompt
-        assert f"Management Support: `{build_kanban_filter(['Assign', 'Reviewer'])}`" in prompt
-        assert f"Searchdoc Operation Board: `{build_kanban_filter(['Assign', 'Reviewer'])}`" in prompt
-
-    def test_담당_리뷰어_아닌_태스크_제외_지시(self):
-        """Shawn이 담당/리뷰어가 아닌 태스크를 보고에서 제외하라는 지시가 포함되는지 확인."""
-        prompt = build_workflow_prompt(1740000000)
-        assert "보고 대상은 Shawn이 담당자(`Assign`) 또는 리뷰어(`Reviewer`)인 태스크뿐이다" in prompt
-        assert "없으면 보고에서 제외한다" in prompt
-
-    def test_조회_실패시_담당자_조건_유지_지시(self):
-        """조회 실패 시 담당/리뷰어 조건을 빼고 재조회하지 말라는 지시가 포함되는지 확인."""
-        prompt = build_workflow_prompt(1740000000)
-        assert "담당/리뷰어 조건을 빼거나 줄여서 다시 조회하지 않는다" in prompt
-
-    def test_보드별_마감_속성명_포함(self):
-        """보드마다 다른 마감일 속성명이 모두 명시되는지 확인."""
-        prompt = build_workflow_prompt(1740000000)
-        assert "Start & Due Date" in prompt  # LT Operation
-        assert "Deadline" in prompt          # Management Support
-        assert "Due Date" in prompt          # Searchdoc Operation
-
-    def test_상태값_Ready_Commit_형식(self):
-        """실제 상태값 'Ready (Commit)'이 사용되는지 확인."""
-        prompt = build_workflow_prompt(1740000000)
-        assert "Ready (Commit)" in prompt
-        assert "In Progress" in prompt
-        assert "In Review" in prompt
-
-    def test_구_보드명_제거(self):
-        """이전 예시 보드명(Product, LT Internal)이 남아있지 않은지 확인."""
-        prompt = build_workflow_prompt(1740000000)
-        assert "LT Internal" not in prompt
-        assert "보드: Product" not in prompt
-
-    def test_보드_한정_지시_포함(self):
-        """3개 보드만 조회하라는 지시가 포함되는지 확인."""
-        prompt = build_workflow_prompt(1740000000)
-        assert "다른 보드는 조회하지 않는다" in prompt
-
-    def test_조회_실패_보고_지시_포함(self):
-        """보드 조회 실패 시 보고서에 명시하라는 지시가 포함되는지 확인."""
-        prompt = build_workflow_prompt(1740000000)
-        assert "보드 조회 실패" in prompt
-
-
-class TestBuildKanbanFilter:
-    """build_kanban_filter 함수 테스트"""
-
-    def test_유효한_JSON(self):
-        """반환값이 유효한 JSON인지 확인."""
-        assert isinstance(json.loads(build_kanban_filter(["Assign", "Reviewer"])), dict)
-
-    def test_담당_리뷰어_people_contains_or_조건(self):
-        """지정한 속성마다 Shawn user_id로 people.contains 조건을 or로 묶는지 확인."""
-        f = json.loads(build_kanban_filter(["Assign", "Reviewer"]))
-        assert f["and"][0] == {"or": [
-            {"property": "Assign", "people": {"contains": SHAWN_NOTION_USER_ID}},
-            {"property": "Reviewer", "people": {"contains": SHAWN_NOTION_USER_ID}},
-        ]}
-
-    def test_LT_Operation_Assign만(self):
-        """리뷰어 속성이 없는 보드는 Assign 조건만 들어가는지 확인."""
-        f = json.loads(build_kanban_filter(["Assign"]))
-        assert f["and"][0] == {"or": [
-            {"property": "Assign", "people": {"contains": SHAWN_NOTION_USER_ID}},
-        ]}
-
-    def test_활성_상태_3개(self):
-        """상태 조건이 Ready (Commit) / In Progress / In Review 세 가지인지 확인."""
-        f = json.loads(build_kanban_filter(["Assign"]))
-        statuses = [c["status"]["equals"] for c in f["and"][1]["or"]]
-        assert statuses == ["Ready (Commit)", "In Progress", "In Review"]
+        assert "Notion 조회 실패" in prompt

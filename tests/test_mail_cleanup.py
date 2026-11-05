@@ -320,7 +320,8 @@ class TestRunWorkflowIntegration:
         def wait(self):
             return 0
 
-    def run(self, tmp_path, cleanup_side_effect):
+    def run(self, tmp_path, cleanup_side_effect,
+            kanban_side_effect=lambda: "*1️⃣ Notion Kanban 태스크 현황* (총 0건)"):
         from unittest.mock import patch
         import src.scheduler.scheduler as sched
 
@@ -333,6 +334,7 @@ class TestRunWorkflowIntegration:
         with patch.object(sched, "LOG_DIR", str(tmp_path)), \
              patch.object(sched, "LAST_RUN_FILE", str(tmp_path / "last_run.json")), \
              patch.object(sched, "cleanup_mailbox", side_effect=cleanup_side_effect) as cleanup, \
+             patch.object(sched, "build_kanban_section", side_effect=kanban_side_effect), \
              patch.object(sched.subprocess, "Popen", side_effect=fake_popen):
             sched.run_workflow()
         return cleanup, calls
@@ -350,3 +352,14 @@ class TestRunWorkflowIntegration:
             raise FileNotFoundError("gmail_token.json")
         _, calls = self.run(tmp_path, boom)
         assert "메일 자동 정리 실패" in calls["prompt"]
+
+    def test_Kanban_섹션이_프롬프트에_들어감(self, tmp_path):
+        _, calls = self.run(tmp_path, lambda epoch: CleanupResult(),
+                            kanban_side_effect=lambda: "*1️⃣ Notion Kanban 태스크 현황* (총 7건)")
+        assert "<kanban_section>\n*1️⃣ Notion Kanban 태스크 현황* (총 7건)\n</kanban_section>" in calls["prompt"]
+
+    def test_Kanban_실패해도_보고_진행(self, tmp_path):
+        def boom():
+            raise RuntimeError("NOTION_TOKEN이 설정되지 않았다 (.env)")
+        _, calls = self.run(tmp_path, lambda epoch: CleanupResult(), kanban_side_effect=boom)
+        assert "Notion 조회 실패 — NOTION_TOKEN이 설정되지 않았다" in calls["prompt"]

@@ -31,7 +31,11 @@ sudo systemctl start|stop|restart <service>  # slack-app, scheduler, gov-funding
 /home/ubuntu/venvs/gov-funding/bin/python -m pytest tests/gov_funding
 /home/ubuntu/venvs/ai-news/bin/python -m pytest tests/ai_news
 /home/ubuntu/venvs/slack-app/bin/python -m pytest tests/slack_app
-/home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py
+/home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py tests/test_kanban.py
+
+# scheduler 일일 보고 1️⃣ Kanban 섹션 미리보기 (Notion 조회만, 전송 없음)
+set -a; . ./.env; set +a
+/home/ubuntu/venvs/scheduler/bin/python -m src.scheduler.kanban
 
 # scheduler 메일 자동 정리 미리보기 (지우지 않고 대상만 JSON 출력)
 /home/ubuntu/venvs/scheduler/bin/python -m src.scheduler.mail_cleanup --hours 72 --dry-run
@@ -249,7 +253,10 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 
 4단계 워크플로우 (평일 9, 13, 17시, 채널 `C0AEW7LF0RJ`):
 
-1. **Notion Kanban 확인** — Shawn이 Assignee/Reviewer인 태스크 (Ready/In Progress/In Review). 그 밖의 태스크는 보고하지 않는다. 보드별 필터 JSON은 `build_kanban_filter()`가 만들어 프롬프트에 그대로 넣는다. Searchdoc Operation Board의 담당 속성은 `Assign`/`Reviewer`이고, 예전의 `Person` 속성은 삭제됐다. `Person`을 쓰면 400 `validation_error`가 나고, CLI가 담당자 조건을 임의로 바꿔 재조회했다 (2026-10-28~11-04, 리뷰어로만 지정된 태스크 16건 중 9건 누락)
+1. **Notion Kanban** — Claude 실행 전에 `kanban.build_kanban_section()`이 Notion API(`NOTION_TOKEN`, `Notion-Version: 2025-09-03` data_sources)로 3개 보드를 조회하고, Shawn이 `Assign`/`Reviewer`인 Ready (Commit)/In Progress/In Review 태스크만 코드에서 다시 골라 1️⃣ 섹션 문구를 완성한다. Claude는 이 섹션을 그대로 넣고 Notion을 다시 조회하지 않는다. 각 줄은 `` `Part` *제목* — 보드 · 역할(담당/리뷰) · 마감(초과 일수) `` 형식이다
+   - 보드별 속성: LT Operation은 `Assign`만 있고 Part 대신 `Work Type`을 쓴다(마감 `Start & Due Date`). Management Support는 `Assign`/`Reviewer`/`Part`/`Deadline`. Searchdoc Operation은 `Assign`/`Reviewer`/`Part`이고 마감은 `Due Date`, 비어 있으면 `Deadline`. 기간이면 end를 마감으로 본다
+   - 예전에는 Claude가 Notion MCP로 직접 조회했다. 그런데 없는 `Person` 속성으로 조회해 400이 나면 조건을 임의로 바꿔 재조회했고(2026-10-28~11-04, 리뷰어로만 지정된 태스크 누락), 57KB 조회 결과를 파일로 받아 읽는 등 실행마다 결과가 달랐다. 그래서 조회를 코드로 옮겼다
+   - 보드 하나가 실패하면 섹션에 `⚠️ *보드* — 보드 조회 실패`로 표시하고 나머지 보드는 그대로 보고한다. 토큰이 없으면 섹션 전체가 `Notion 조회 실패`로 나간다
 2. **Gmail 확인 및 라벨링** — 최근 1시간 메일, 발신자 기준 자동 라벨링 (회의록, CSP, 청구서, 정부지원사업, VC 등)
    - **메일 자동 정리**: Claude 실행 전에 `mail_cleanup.cleanup_mailbox()`가 지난 실행 이후(최대 72시간) 메일 중 광고(제목 맨 앞 `(광고)`/`[광고]`), 미팅 거절(`거절함:`/`거절됨:`/`Declined:`), GitHub 알림(`notifications@github.com`), 보안 알림(Google `보안 알림`/`Security alert`, AWS Control Tower `aws-controltower-AggregateSecurityNotifications`)을 휴지통으로 옮긴다. Gmail 검색어로 찾은 뒤 발신자·제목·수신 시각을 코드에서 다시 확인한다. 별표/보낸/임시보관 메일은 지우지 않는다. Google `중요 보안 알림`과 `noreply@github.com`(인증 코드 등)도 남긴다
    - 삭제를 Claude에 맡기지 않는 이유: Claude가 프롬프트의 `after:` 값을 2024년 기준으로 재계산해 검색한 적이 있다 (2026-11-03~04 4회 중 3회). 같은 방식으로 지우면 범위 밖의 오래된 메일까지 지워진다
@@ -324,6 +331,7 @@ slack-bots/
 | `AI_NEWS_CHANNEL_ID` | AI 뉴스 알림/Q&A 채널 | (필수) |
 | `GMAIL_CREDENTIALS` | Gmail API credentials JSON | (선택) |
 | `GMAIL_MCP_CREDENTIALS_PATH` | scheduler 메일 자동 정리용 OAuth 클라이언트 | `/home/ubuntu/mcp/gmail-mcp-server/credentials.json` |
+| `NOTION_TOKEN` | scheduler Kanban 섹션용 Notion integration 토큰 (Claude CLI Notion MCP와 같은 토큰) | (필수) |
 | `GMAIL_MCP_TOKEN_PATH` | scheduler 메일 자동 정리용 OAuth 토큰 (refresh token 사용) | `/home/ubuntu/mcp/gmail-mcp-server/gmail_token.json` |
 | `EMAIL_RECIPIENTS` | 이메일 수신자 (콤마 구분) | (선택) |
 | `RELEVANCE_THRESHOLD` | Bedrock 관련성 임계값 (운영 `.env` 0.7) | `0.6` |
@@ -421,7 +429,7 @@ sudo systemctl stop scheduler            # 개별 중지
 /home/ubuntu/venvs/gov-funding/bin/python -m pytest tests/gov_funding
 /home/ubuntu/venvs/ai-news/bin/python -m pytest tests/ai_news
 /home/ubuntu/venvs/slack-app/bin/python -m pytest tests/slack_app
-/home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py
+/home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py tests/test_kanban.py
 
 # 개별 테스트 스크립트
 python scripts/test_bedrock.py   # Bedrock 분석 테스트
