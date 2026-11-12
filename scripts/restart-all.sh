@@ -4,6 +4,7 @@ sudo systemctl restart slack-app
 sudo systemctl restart scheduler
 sudo systemctl restart gov-funding
 sudo systemctl restart ai-news
+sudo systemctl restart aec-news
 echo ""
 echo "=== 상태 확인 ==="
-systemctl status slack-app scheduler gov-funding ai-news --no-pager
+systemctl status slack-app scheduler gov-funding ai-news aec-news --no-pager

@@ -1,0 +1,10 @@
+# aec-news (EPC·AEC × AI 뉴스 모니터링) 의존성
+pydantic>=2.0.0
+requests>=2.31.0
+feedparser>=6.0.0
+boto3>=1.34.0
+apscheduler>=3.10.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

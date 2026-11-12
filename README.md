@@ -1,8 +1,8 @@
 # Slack Bots
 
-Slack 기반 업무 자동화 플랫폼. 정부 지원사업 공고 모니터링, AI/ML 뉴스 크롤링, 업무 워크플로우 자동화, Claude CLI 연동 Slack 봇을 EC2에서 systemd 서비스로 운영한다.
+Slack 기반 업무 자동화 플랫폼. 정부 지원사업 공고 모니터링, AI/ML 뉴스 크롤링, EPC·AEC × AI 뉴스 링크 정리, 업무 워크플로우 자동화, Claude CLI 연동 Slack 봇을 EC2에서 systemd 서비스로 운영한다.
 
-4개의 독립 서비스가 각각 별도 Python 가상환경(uv)으로 분리되어 있으며, S3를 통해 소스 코드를 배포하고 systemd로 프로세스를 관리한다.
+5개의 독립 서비스가 각각 별도 Python 가상환경(uv)으로 분리되어 있으며, S3를 통해 소스 코드를 배포하고 systemd로 프로세스를 관리한다.
 
 ## Architecture
 
@@ -21,6 +21,11 @@ Slack 기반 업무 자동화 플랫폼. 정부 지원사업 공고 모니터링
 │  │  (매일 9시)   │  │  (월수금 8시) │                 │
 │  │  9개 크롤러   │  │  17개 크롤러  │                 │
 │  └──────┬───────┘  └──────┬───────┘                 │
+│  ┌──────┴───────┐         │                         │
+│  │  aec-news     │         │                         │
+│  │  (매일 8:30)  │         │                         │
+│  │  Google News  │         │                         │
+│  └──────┬───────┘         │                         │
 │         │                  │                         │
 │         └────────┬─────────┘                         │
 │                  ▼                                    │
@@ -70,6 +75,15 @@ Claude CLI로 Notion Kanban 확인, Gmail 요약/초안 작성, Slack 보고를 
 - **워크플로우**: crawl → deduplicate(제목 유사도) → S3 Vectors 신규 식별 → bedrock_summarize(중요도 평가) → vector storage → Slack 알림
 - 스케줄: 월/수/금 8시 (시작 시 1회 실행)
 - venv: `/home/ubuntu/venvs/ai-news`
+
+### 5. aec-news — EPC·AEC × AI 뉴스 링크 정리
+
+국내 10·미국 10·싱가포르 4개 주요 언론사에서 EPC & AI, AEC & AI, EPC & RAG, AEC & RAG, AI와 도면/BIM 기사를 찾아 링크를 국가별로 정리해 `#searchdoc-global-news`에 보낸다.
+
+- **검색**: Google News RSS (`intitle:` 검색어 + `site:` 언론사 묶음, 쿼리 190자 이하) → 언론사 호스트·게시 시각 필터
+- **워크플로우**: 검색 → 중복/전송 이력 제외 → Bedrock 관련성 판정 → 원문 URL 복원 → 한 줄 요약·같은 소식 묶기 → Slack 알림
+- 스케줄: 매일 8:30 KST (재시작 시 실행하지 않음)
+- venv: `/home/ubuntu/venvs/aec-news`
 
 ## Prerequisites
 

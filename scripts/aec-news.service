@@ -1,0 +1,17 @@
+[Unit]
+Description=AEC News Monitor (EPC·AEC × AI 뉴스, 매일 08:30 KST)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/slack-bots
+EnvironmentFile=/home/ubuntu/slack-bots/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/venvs/aec-news/bin/python -m src.aec_news.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

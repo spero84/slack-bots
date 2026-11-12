@@ -1,6 +1,6 @@
 # Slack Bots
 
-Slack 기반 업무 자동화 시스템 (정부 지원사업 모니터링, AI 뉴스 크롤링, 워크플로우 스케줄러, Claude CLI 봇)
+Slack 기반 업무 자동화 시스템 (정부 지원사업 모니터링, AI 뉴스 크롤링, EPC·AEC × AI 뉴스 링크 정리, 워크플로우 스케줄러, Claude CLI 봇)
 
 ## Architecture
 
@@ -10,6 +10,7 @@ Slack 기반 업무 자동화 시스템 (정부 지원사업 모니터링, AI �
 | scheduler | `src.scheduler.scheduler` | `/home/ubuntu/venvs/scheduler` | 평일 9,13,17시 |
 | gov-funding | `src.gov_funding.main` | `/home/ubuntu/venvs/gov-funding` | 매일 9시 |
 | ai-news | `src.ai_news.main` | `/home/ubuntu/venvs/ai-news` | 월/수/금 8시 |
+| aec-news | `src.aec_news.main` | `/home/ubuntu/venvs/aec-news` | 매일 8:30 |
 
 Python 가상환경은 프로젝트 외부 `/home/ubuntu/venvs/` 디렉토리에 서비스별로 분리되어 있다. `scripts/setup-venvs.sh`로 uv를 사용하여 생성한다.
 
@@ -23,13 +24,14 @@ Python 가상환경은 프로젝트 외부 `/home/ubuntu/venvs/` 디렉토리에
 /home/ubuntu/restart-all.sh                  # 전체 서비스 재시작
 
 # 서비스 관리
-sudo systemctl start|stop|restart <service>  # slack-app, scheduler, gov-funding, ai-news
+sudo systemctl start|stop|restart <service>  # slack-app, scheduler, gov-funding, ai-news, aec-news
 /home/ubuntu/status.sh                       # 전체 상태 확인
 /home/ubuntu/logs.sh <service>               # journalctl -u <service> -f
 
 # 테스트 (서비스별 venv에서 해당 디렉토리만)
 /home/ubuntu/venvs/gov-funding/bin/python -m pytest tests/gov_funding
 /home/ubuntu/venvs/ai-news/bin/python -m pytest tests/ai_news
+/home/ubuntu/venvs/aec-news/bin/python -m pytest tests/aec_news
 /home/ubuntu/venvs/slack-app/bin/python -m pytest tests/slack_app
 /home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py tests/test_kanban.py tests/test_mail_digest.py
 
@@ -49,6 +51,13 @@ set -a; . ./.env; set +a
 /home/ubuntu/venvs/gov-funding/bin/python -m src.gov_funding.main --dry-run  # 알림/저장 없이 결과 JSON 출력
 /home/ubuntu/venvs/gov-funding/bin/python -m src.gov_funding.main --seed     # 알림 없이 저장만
 /home/ubuntu/venvs/gov-funding/bin/python -m src.gov_funding.main --once     # 실제 1회 실행
+
+# aec-news 수동 실행 — Google News 요청 ~22회(3초 간격) + 원문 URL 복원, 약 2분
+set -a; . ./.env; set +a
+/home/ubuntu/venvs/aec-news/bin/python -m src.aec_news.main --dry-run          # Slack 전송/상태 저장 없이 미리보기 (Bedrock 호출함)
+/home/ubuntu/venvs/aec-news/bin/python -m src.aec_news.main --dry-run --json   # 결과 JSON (쿼리별 통계 포함)
+/home/ubuntu/venvs/aec-news/bin/python -m src.aec_news.main --once             # 실제 1회 실행 (Slack 전송, 이력 저장)
+# 옵션: --hours N (게시 N시간 이내로 직접 지정), --no-llm (Bedrock 없이 제목 키워드 규칙)
 ```
 
 ## Code Conventions
@@ -62,7 +71,7 @@ set -a; . ./.env; set +a
 - **단위 테스트 필수 — 코드 변경 시 반드시 관련 테스트 작성 및 실행**
 - `.env`로 환경변수 관리 (절대 커밋하지 않음)
 - **작업 완료 후 반드시 `git pull` → `git push` 수행 (push 전에 항상 pull 먼저)**
-- **`src/` 코드 수정 후 반드시 해당 서비스 재시작 (`sudo systemctl restart <service>`) — 서비스 매핑: `src/slack_app/` → slack-app, `src/scheduler/` → scheduler, `src/gov_funding/` → gov-funding, `src/ai_news/` → ai-news**
+- **`src/` 코드 수정 후 반드시 해당 서비스 재시작 (`sudo systemctl restart <service>`) — 서비스 매핑: `src/slack_app/` → slack-app, `src/scheduler/` → scheduler, `src/gov_funding/` → gov-funding, `src/ai_news/` → ai-news, `src/aec_news/` → aec-news**
 
 ## Key Patterns
 
@@ -123,6 +132,32 @@ HTML 스크래핑보다 RSS가 안정적이다. 실제로 세 소스가 조용�
 - arXiv 제목에는 카테고리 접두어가 없다. `^[\w.]+:\s*`로 접두어를 제거하면 `TANGO: Humanoid...` 같은 제목의 앞부분이 잘린다.
 - `requests.exceptions.HTTPError`의 상태 코드를 볼 때 `if e.response:`는 쓰지 말 것 — `Response.__bool__`이 4xx/5xx에서 False라 403이 분기를 타지 못한다. `e.response is not None`으로 비교한다.
 
+### aec-news (EPC·AEC × AI 뉴스 링크 정리)
+
+매일 08:30 KST, 채널 `C0CGZRXP5JS`(#searchdoc-global-news). 국내 10(조선·중앙·동아·한겨레·경향·연합·한경·매경·서경·머투), 미국 10(NYT·WSJ·WaPo·Reuters·Bloomberg·AP·CNBC·CNN·Forbes·USA Today), 싱가포르 4(Straits Times·Business Times·CNA·The Edge Singapore) 언론사에서 사용자 지정 키워드(EPC & AI, AEC & AI, EPC & RAG, AEC & RAG, AI와 Drawings/BIM)로 검색해 기사 링크를 국가별로 정리한다. 언론사·검색어는 `src/aec_news/config.py` (`_OUTLET_LIST`, `SEARCH_TERMS`).
+
+**Google News RSS 주의사항 (2026-11-12 실측):**
+- **`q`가 200자를 넘으면 Google이 뒤를 조용히 잘라 `when:`이 빠진다** — 오류 없이 수년 전 기사까지 돌아온다 (200자 정상, 201자부터 무시). 그래서 `build_queries()`가 언론사를 묶어 190자 이하로 만들고(`MAX_QUERY_CHARS`), 테스트가 모든 쿼리 길이를 검사한다. 언론사나 검색어를 늘리면 쿼리 수가 늘어날 뿐이다. 그래도 오래된 기사가 섞이므로 게시 시각은 코드에서 다시 거르고, 기간 밖 기사가 절반을 넘는 쿼리는 `검색 기간 조건이 무시된 쿼리` 경고를 낸다
+- **`intitle:`을 붙인다.** 없으면 사이드바·관련 기사 문구까지 매칭돼 결과가 거의 전부 노이즈다. 따옴표("EPC")는 결과를 바꾸지 않는다. 국내 기사에서 'AEC'는 반도체 케이블·X-ray 노출 제어라 국내 검색어에서 뺐다
+- 검색어 없이 넓게 찾고 언론사로 거르는 방식은 100건 한도 때문에 주요 언론사 기사를 놓친다 — 반드시 `site:` 묶음으로 찾는다
+- `site:chosun.com`은 하위 도메인까지 매칭한다. 언론사는 `<source url>` **호스트가 `keep_hosts`에 정확히 있을 때만** 받는다 (cbiz.chosun.com '속보서비스', mlbpark.donga.com, dic.hankyung.com, stock.mk.co.kr 연합 재배포, view.mk.co.kr 더구루, councils.forbes.com, sponsored.bloomberg.com, *.usatoday.com 스포츠 블로그, en.yna.co.kr 등 영문판 제외). 표시 이름(`<source>` 텍스트)은 partners.wsj.com도 'WSJ'라 쓰지 않는다. 국내 검색은 한글 제목만, 해외 검색은 한글 없는 제목만 받는다
+- 원문 경로가 `/press-release`, `/profile/`, `/company/`, `/videos/` 등이면 기사가 아니라 뺀다 (USA Today는 보도자료를 본 도메인에 싣는다). Forbes `/councils/`는 `Forbes (Councils 기고)`로 표시
+- todayonline.com(TODAY)은 CNA로 통합돼 제목이 빈 항목만 와서 제외했다. GDELT는 대상 언론사 23곳 중 16곳을 수집하지 않고 429가 잦아 쓰지 않는다
+- 국내 하루 3~4건, 미국·싱가포르 주요 매체는 주 1~2건 수준이라 검색 기간이 국내 2일, 해외 7일이다(`AEC_NEWS_KR_DAYS`, `AEC_NEWS_INTL_DAYS`). 마지막 성공 후 더 지났으면 늘린다(최대 7일). 겹치는 기간의 중복은 전송 이력이 막는다
+
+**원문 URL 복원:** RSS 링크(`news.google.com/rss/articles/CBMi...`)는 JS 리다이렉트라 따라가도 원문에 닿지 않고, 옛 base64 디코딩은 지금 ID(`AU_yqL...`)에 통하지 않는다. `GET /rss/articles/{id}` 페이지의 `data-n-a-sg`/`data-n-a-ts` 서명으로 `batchexecute`(rpc `Fbv4je`)를 POST해 받는다 (index 1 = 정식 URL, index 3 = AMP). **`/read/{id}` 경로는 실측 중 429(google.com/sorry)를 받았으니 쓰지 않는다.** 비공개 API라 실패하면 Google News 링크를 그대로 보낸다. 요청 2회가 들어 Bedrock 통과 기사만(최대 `AEC_NEWS_MAX_DECODES`=30) 복원하고 결과는 상태 파일에 30일 캐시한다.
+
+**요청 제한:** news.google.com 요청은 전부 순차로 3초 + 0~1초 지터 간격(`AEC_NEWS_REQUEST_INTERVAL`). 네트워크 오류·5xx(503 제외)는 10초·30초 뒤 두 번 재시도. **429/503/google.com/sorry/동의 페이지를 받으면 그 실행의 Google 호출(검색·복원)을 모두 멈추고** 받은 결과로 보내며 `⚠️ Google News 차단 감지`를 표시한다 (재시도하면 차단이 길어진다). 지역마다 점검 쿼리(`intitle:AI` + 언론사 2~3곳, `HEALTH_TERMS`) 결과가 0건이면 `점검 검색 결과 0건` 경고 — 주제 쿼리는 실제로 0건인 날이 많아 0건 경고를 하지 않는다.
+
+**Bedrock 판정 (`relevance.py`, Sonnet 5, thinking off, structured outputs):**
+- triage(60건 배치): `ai_tech`(AI를 EPC·건설·도면·BIM 업무에 적용) / `ai_infra`(건설사의 AI 데이터센터·전력 인프라 수주 — AI가 발주 수요일 뿐) / `irrelevant`(동음이의어: EPC Power, 유럽정치공동체, 전자제품코드, 'AEC' 케이블 등). `ai_tech`이고 score ≥ `AEC_NEWS_RELEVANCE_THRESHOLD`(0.6)면 본문, `ai_infra`는 `📎 참고` 섹션(최신 8건, `AEC_NEWS_INCLUDE_INFRA=0`이면 숨김)
+- summarize: 통과 기사의 한국어 한 줄 요약 + 같은 국가의 같은 소식 묶음 번호. 보도자료 기반 기사가 여러 매체에 동시에 실려 대표 1건 + `같은 소식:` 링크로 묶는다
+- triage 실패 배치는 `keyword_fallback()`(제목 규칙)으로 고르고 `⚠️ AI 관련성 판정 실패` 표시, 요약 실패는 링크만 보낸다. 정규식에서 `\b`는 'AI가'처럼 한글이 붙으면 매칭되지 않아 영문 경계 `(?<![A-Za-z])AI(?![A-Za-z])`를 쓰고, AI/RAG/BIM/CAD는 대소문자를 구분한다('rag & bone', 'said', 'NBIM', 'decade')
+
+**상태 (`$AEC_NEWS_STATE_DIR/state.json`, 기본 `/home/ubuntu/.local/state/aec-news`):** `sent`(언론사+정규화 제목 / Google ID / 정규화 원문 URL — 하나라도 같으면 이미 보낸 기사, 45일), `judged`(Bedrock 탈락 기사, 10일 동안 재판정 안 함), `decoded`(원문 URL 캐시, 30일), `last_success`. **Google은 같은 기사에 ID를 둘 이상 준다**(AMP 사본 등) — Google ID만으로 중복을 판단하지 말 것. 전송 이력은 **Slack 전송 성공 후에만** 저장하고(실패하면 다음 실행에서 다시 보낸다), `last_success`는 검색이 하나도 실패하지 않은 실행에서만 갱신한다.
+
+**재시작은 Slack에 아무것도 보내지 않는다** (`AEC_NEWS_RUN_ON_START=0` 기본 — ai-news와 다름). 새 기사가 없는 날에도 `새 소식 없음` 메시지는 보낸다 (조용히 고장나는 것 방지).
+
 ### 워크플로우 파이프라인
 - **gov-funding**: crawl(소스별 격리) → deduplicate → deadline_filter → keyword_filter → S3 Vectors 조회로 분류(저장된 공고/다른 소스로 저장된 같은 사업/신규) → **신규만** bedrock_filter(상세+첨부, 마감일 추출) → slack/gmail notify → **알림 성공 후** vector upsert
   - 저장된 공고는 저장된 점수/요약을 재사용하고 Bedrock을 다시 부르지 않는다
@@ -131,6 +166,7 @@ HTML 스크래핑보다 RSS가 안정적이다. 실제로 세 소스가 조용�
   - 목록에 마감일이 없는 소스(MSIT/MOTIE/NIA 등)는 저장된 마감일(처음 분석 때 첨부에서 추출)을 마감일 필터 전에 복원한다 — 복원하지 않으면 재저장 때 마감일이 지워져 리마인더가 나가지 않는다
   - 마감 리마인더(D-7, D-3)는 오늘 수집된 저장 공고 + 수집 범위 밖으로 밀려난 저장 공고(저장된 마감일 기준) 대상
 - **ai-news**: crawl → deduplicate → vector_key 비교(신규 식별) → bedrock_summarize → vector storage → slack notify
+- **aec-news**: Google News 검색(주제 × 국가 × 언론사 묶음) → 언론사 호스트/게시 시각/제목 언어 필터 → 실행 내 중복 제거 → 전송 이력·탈락 캐시 제외 → Bedrock 판정(ai_tech/ai_infra/irrelevant) → **통과 기사만** 원문 URL 복원 → 한 줄 요약 + 같은 소식 묶기 → Slack → **전송 성공 후** 이력 저장 (아래 'aec-news' 절)
 
 ### Data Models
 
@@ -314,10 +350,16 @@ slack-bots/
 │   │   ├── notifiers/        # slack
 │   │   ├── storage/          # models, vector_storage
 │   │   └── utils/            # config, logger
+│   ├── aec_news/             # EPC·AEC × AI 뉴스 링크 정리 (Google News RSS → Bedrock 판정 → Slack)
+│   │   ├── config.py         # 언론사 24곳(keep_hosts), 검색어, 환경변수
+│   │   ├── google_news.py    # 쿼리 묶기(≤190자), 검색/필터, 원문 URL 복원, 차단 감지
+│   │   ├── relevance.py      # Bedrock 판정·요약, 키워드 폴백
+│   │   ├── slack_notifier.py # 국가별 섹션, 같은 소식 묶기, 블록 한도 분할
+│   │   └── state.py          # 전송 이력, 탈락 캐시, URL 캐시
 │   ├── slack_app/            # Slack Socket Mode 봇 (Claude CLI 연동)
 │   └── scheduler/            # 업무 자동화 워크플로우 (Notion/Gmail/Slack)
 ├── scripts/                  # 배포, 서비스 관리, 테스트 스크립트
-├── requirements*.txt         # 서비스별 의존성 파일 4개
+├── requirements*.txt         # 서비스별 의존성 파일 5개
 ├── docker-compose.yml
 └── .env                      # 환경변수 (커밋 금지)
 ```
@@ -354,6 +396,16 @@ slack-bots/
 | `DEADLINE_ALERT_DAYS` | 마감 알림 기준일 | `7` |
 | `AI_NEWS_IMPORTANCE_THRESHOLD` | AI 뉴스 중요도 임계값 | `0.5` |
 | `AI_NEWS_MAX_PER_SOURCE` | 소스별 최대 기사 수 | `20` |
+| `AEC_NEWS_CHANNEL_ID` | aec-news 알림 채널 (운영값 `C0CGZRXP5JS`) | (필수) |
+| `AEC_NEWS_MODEL_ID` | aec-news 판정/요약 모델 | `BEDROCK_MODEL_ID` |
+| `AEC_NEWS_RELEVANCE_THRESHOLD` | 본문에 넣을 ai_tech 점수 하한 | `0.6` |
+| `AEC_NEWS_INCLUDE_INFRA` / `AEC_NEWS_MAX_INFRA` | 📎 참고(AI 인프라 EPC) 섹션 표시 / 최대 건수 | `1` / `8` |
+| `AEC_NEWS_KR_DAYS` / `AEC_NEWS_INTL_DAYS` | 검색 기간(일) 국내 / 미국·싱가포르 | `2` / `7` |
+| `AEC_NEWS_HOUR` / `AEC_NEWS_MINUTE` | 실행 시각 (KST) | `8` / `30` |
+| `AEC_NEWS_RUN_ON_START` | 서비스 시작 시 1회 실행 (Slack 전송) | `0` |
+| `AEC_NEWS_REQUEST_INTERVAL` | Google News 요청 간격(초, +0~1초 지터) | `3.0` |
+| `AEC_NEWS_MAX_DECODES` | 실행당 원문 URL 복원 상한 | `30` |
+| `AEC_NEWS_STATE_DIR` | 상태 파일 디렉토리 | `/home/ubuntu/.local/state/aec-news` |
 | `CLAUDE_CODE_USE_BEDROCK` | Claude Code Bedrock 사용 | `1` |
 | `AWS_BEARER_TOKEN_BEDROCK` | Bedrock Bearer Token — 설정하지 않음 (Claude CLI가 EC2 IAM Role 사용, 위 "Claude CLI 인증" 참고) | (미설정) |
 | `ANTHROPIC_API_PROVIDER` | API 프로바이더 | `bedrock` |
@@ -381,6 +433,7 @@ slack-bots/
 | 공통 | pydantic, requests, beautifulsoup4, lxml, boto3, python-dateutil |
 | gov-funding | playwright, apscheduler, olefile (HWP 파싱), google-api-python-client |
 | ai-news | feedparser, slack_sdk, apscheduler |
+| aec-news | feedparser, requests, boto3, apscheduler, pydantic |
 | slack-app | slack-bolt, slack-sdk, python-dotenv, boto3 |
 | 테스트 | pytest, pytest-asyncio, moto |
 
@@ -406,6 +459,7 @@ RestartSec=10
 | scheduler | `/home/ubuntu/venvs/scheduler/bin/python -m src.scheduler.scheduler` |
 | gov-funding | `/home/ubuntu/venvs/gov-funding/bin/python -m src.gov_funding.main` |
 | ai-news | `/home/ubuntu/venvs/ai-news/bin/python -m src.ai_news.main` |
+| aec-news | `/home/ubuntu/venvs/aec-news/bin/python -m src.aec_news.main` (유닛 파일 원본 `scripts/aec-news.service`) |
 
 서비스 파일 수정 후: `sudo systemctl daemon-reload && sudo systemctl restart <service>`
 
@@ -414,7 +468,7 @@ RestartSec=10
 ```bash
 # 전체 상태 확인
 /home/ubuntu/status.sh
-systemctl status slack-app scheduler gov-funding ai-news
+systemctl status slack-app scheduler gov-funding ai-news aec-news
 
 # 실시간 로그
 /home/ubuntu/logs.sh <service>           # journalctl -u <service> -f
@@ -439,6 +493,7 @@ sudo systemctl stop scheduler            # 개별 중지
 # 다른 서비스 의존성(feedparser, slack_bolt 등)이 없어 수집 단계에서 실패한다)
 /home/ubuntu/venvs/gov-funding/bin/python -m pytest tests/gov_funding
 /home/ubuntu/venvs/ai-news/bin/python -m pytest tests/ai_news
+/home/ubuntu/venvs/aec-news/bin/python -m pytest tests/aec_news
 /home/ubuntu/venvs/slack-app/bin/python -m pytest tests/slack_app
 /home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py tests/test_kanban.py tests/test_mail_digest.py
 
@@ -455,8 +510,8 @@ uv 기반 배포 파이프라인:
 
 1. **deploy-to-s3** — 로컬에서 소스를 zip 압축 후 `s3://slack-bots-prod-snapshots/source/` 업로드
 2. **download-source** — EC2에서 S3 zip 다운로드 후 `/home/ubuntu/slack-bots/`에 압축 해제
-3. **setup-venvs** — uv로 4개 가상환경 생성/재설정 (`/home/ubuntu/venvs/`)
-4. **systemctl restart** — 4개 systemd 서비스 재시작
+3. **setup-venvs** — uv로 5개 가상환경 생성/재설정 (`/home/ubuntu/venvs/`)
+4. **systemctl restart** — 5개 systemd 서비스 재시작
 
 ```bash
 # 전체 배포 흐름
