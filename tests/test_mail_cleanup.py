@@ -1,6 +1,7 @@
 """scheduler 메일 자동 정리 (광고/미팅 거절/GitHub/보안 알림 휴지통 이동) 테스트"""
 
 import json
+import re
 
 import pytest
 import requests
@@ -14,6 +15,7 @@ from src.scheduler.mail_cleanup import (
     is_eligible,
     parse_metadata,
 )
+from src.scheduler.mail_digest import DigestResult
 from src.scheduler.scheduler import (
     build_mail_cleanup_summary,
     build_promotion_candidates,
@@ -321,7 +323,8 @@ class TestRunWorkflowIntegration:
             return 0
 
     def run(self, tmp_path, cleanup_side_effect,
-            kanban_side_effect=lambda: "*1️⃣ Notion Kanban 태스크 현황* (총 0건)"):
+            kanban_side_effect=lambda: "*1️⃣ Notion Kanban 태스크 현황* (총 0건)",
+            digest_side_effect=lambda epoch: DigestResult()):
         from unittest.mock import patch
         import src.scheduler.scheduler as sched
 
@@ -331,12 +334,15 @@ class TestRunWorkflowIntegration:
             calls["prompt"] = cmd[cmd.index("-p") + 3]  # [-p, --model, <model>, prompt]
             return self.FakeProcess()
 
+        # build_digest를 막지 않으면 테스트가 실제 Gmail·Bedrock을 호출한다
         with patch.object(sched, "LOG_DIR", str(tmp_path)), \
              patch.object(sched, "LAST_RUN_FILE", str(tmp_path / "last_run.json")), \
              patch.object(sched, "cleanup_mailbox", side_effect=cleanup_side_effect) as cleanup, \
              patch.object(sched, "build_kanban_section", side_effect=kanban_side_effect), \
+             patch.object(sched, "build_digest", side_effect=digest_side_effect) as digest, \
              patch.object(sched.subprocess, "Popen", side_effect=fake_popen):
             sched.run_workflow()
+        calls["digest"] = digest
         return cleanup, calls
 
     def test_정리_결과가_프롬프트에_들어감(self, tmp_path):
@@ -363,3 +369,22 @@ class TestRunWorkflowIntegration:
             raise RuntimeError("NOTION_TOKEN이 설정되지 않았다 (.env)")
         _, calls = self.run(tmp_path, lambda epoch: CleanupResult(), kanban_side_effect=boom)
         assert "Notion 조회 실패 — NOTION_TOKEN이 설정되지 않았다" in calls["prompt"]
+
+    def test_중요_메일_요약이_프롬프트에_들어감(self, tmp_path):
+        cleanup, calls = self.run(tmp_path, lambda epoch: CleanupResult())
+        calls["digest"].assert_called_once()
+        # 정리와 같은 시간 범위로 모은다
+        assert calls["digest"].call_args.args[0] == cleanup.call_args.args[0]
+        assert "<important_mail_section>\n*📌 중요 메일 요약*\n> 새 메일 없음\n</important_mail_section>" \
+            in calls["prompt"]
+
+    def test_중요_메일_요약_실패해도_보고_진행(self, tmp_path):
+        def boom(epoch):
+            raise FileNotFoundError("gmail_token.json")
+        _, calls = self.run(tmp_path, lambda epoch: CleanupResult(), digest_side_effect=boom)
+        assert "⚠️ 중요 메일 요약 실패: gmail_token.json" in calls["prompt"]
+        assert "<kanban_section>" in calls["prompt"]
+
+    def test_보고서_시각이_프롬프트에_들어감(self, tmp_path):
+        _, calls = self.run(tmp_path, lambda epoch: CleanupResult())
+        assert re.search(r"📅 \d{4}년 \d{1,2}월 \d{1,2}일 \([월화수목금토일]\) \d{2}:\d{2} KST\n", calls["prompt"])

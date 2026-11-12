@@ -223,3 +223,47 @@ class TestKanbanPromptIntegration:
     def test_섹션_없으면_실패_표시(self):
         prompt = build_workflow_prompt(1740000000)
         assert "Notion 조회 실패" in prompt
+
+
+class TestMailDigestPromptIntegration:
+    """2단계: scheduler가 만든 중요 메일 요약 섹션과 보고서 시각을 Claude가 그대로 넣도록 하는 프롬프트 테스트"""
+
+    SECTION = ("*📌 중요 메일 요약* (새 메일 3건 · 스레드 2개 중 1건)\n"
+               "> 🔴 *RE: NEO 계약관련 법무검토본 공유* — 김태일 (samsung.com) · 11/11 16:21\n"
+               ">     `법무·계약` 표준계약서 문구 변경이 어렵다며 금주 중 체결을 요청함.\n"
+               ">     👉 조항별 수용 여부 결정 후 회신")
+
+    def test_섹션이_그대로_포함(self):
+        prompt = build_workflow_prompt(1740000000, mail_digest_section=self.SECTION)
+        assert f"<important_mail_section>\n{self.SECTION}\n</important_mail_section>" in prompt
+
+    def test_다시_고르거나_요약하지_않도록_지시(self):
+        prompt = build_workflow_prompt(1740000000, mail_digest_section=self.SECTION)
+        assert "중요 메일을 다시 고르거나 요약하지 않는다" in prompt
+        assert "`👉`가 없는 메일은 할 일로 만들지 않는다" in prompt
+        assert "is:important" not in prompt   # Claude가 따로 중요 메일을 거르던 지시 제거
+
+    def test_보고서_2번_섹션_맨_위에_배치(self):
+        prompt = build_workflow_prompt(1740000000, mail_digest_section=self.SECTION)
+        report = prompt[prompt.index("보고서 전체 구조"):]
+        gmail = report[report.index("*2️⃣ Gmail*"):]
+        assert gmail.index("<important_mail_section>") < gmail.index("*📩 새 메일 목록*")
+
+    def test_섹션_없으면_실패_표시(self):
+        prompt = build_workflow_prompt(1740000000)
+        assert "⚠️ 중요 메일 요약 실패" in prompt
+
+    def test_보고서_시각_고정(self):
+        prompt = build_workflow_prompt(1740000000, report_time="2026년 11월 12일 (목) 09:00 KST")
+        assert "📅 2026년 11월 12일 (목) 09:00 KST\n" in prompt
+        assert "날짜와 시간을 첫 줄에 표시" not in prompt
+
+
+class TestFormatReportTime:
+    def test_KST_요일_포함(self):
+        from datetime import datetime, timezone
+        from src.scheduler.scheduler import format_report_time
+        assert format_report_time(datetime(2026, 11, 12, 0, 0, 5, tzinfo=timezone.utc)) == \
+            "2026년 11월 12일 (목) 09:00 KST"
+        assert format_report_time(datetime(2026, 3, 2, 4, 0, tzinfo=timezone.utc)) == \
+            "2026년 3월 2일 (월) 13:00 KST"

@@ -171,6 +171,13 @@ class GmailClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_message(self, message_id: str) -> dict:
+        """본문까지 포함한 메일 전체 (format=full). 본문 data는 Gmail이 UTF-8로 풀어 준다."""
+        resp = self.session.get(f"{GMAIL_API}/messages/{message_id}", headers=self._headers(),
+                                params={"format": "full"}, timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+
     def trash(self, message_id: str) -> None:
         resp = self.session.post(f"{GMAIL_API}/messages/{message_id}/trash",
                                  headers=self._headers(), timeout=HTTP_TIMEOUT)

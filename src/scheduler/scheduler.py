@@ -15,6 +15,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from src.scheduler.kanban import build_kanban_section, kanban_failure_section
 from src.scheduler.mail_cleanup import CATEGORIES, CleanupResult, cleanup_mailbox
+from src.scheduler.mail_digest import build_digest, digest_failure_section, format_digest_section
 
 # 로그 디렉토리 생성 (환경에 따라 자동 설정)
 HOME_DIR = os.environ.get("HOME", "/home/ec2-user")
@@ -29,6 +30,7 @@ DEFAULT_LOOKBACK_SECONDS = 86400   # 파일 없을 때 기본 24시간
 MAX_LOOKBACK_SECONDS = 259200      # 최대 72시간 (주말 커버)
 
 KST = timezone(timedelta(hours=9))
+WEEKDAYS_KO = "월화수목금토일"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -110,11 +112,23 @@ def build_promotion_candidates(cleanup: Optional[CleanupResult]) -> str:
     return "\n".join(f"- `{p['id']}` · {p['from']} · {p['subject']}" for p in cleanup.promotions)
 
 
+def format_report_time(now: datetime) -> str:
+    """보고서 첫 줄 날짜·시각. Claude에 맡기면 09:00 실행 보고서에 '13:00 KST'를 적은 적이 있다."""
+    now = now.astimezone(KST)
+    return f"{now.year}년 {now.month}월 {now.day}일 ({WEEKDAYS_KO[now.weekday()]}) {now:%H:%M} KST"
+
+
 def build_workflow_prompt(gmail_after_epoch: int, cleanup: Optional[CleanupResult] = None,
-                          kanban_section: Optional[str] = None) -> str:
-    """워크플로우 프롬프트를 Gmail 검색 시간 범위, 메일 자동 정리 결과, Kanban 섹션과 함께 동적 생성."""
+                          kanban_section: Optional[str] = None,
+                          mail_digest_section: Optional[str] = None,
+                          report_time: Optional[str] = None) -> str:
+    """워크플로우 프롬프트를 Gmail 검색 시간 범위, 메일 자동 정리 결과, Kanban·중요 메일 섹션과 함께 동적 생성."""
     if kanban_section is None:
         kanban_section = kanban_failure_section("Kanban 섹션이 생성되지 않았다")
+    if mail_digest_section is None:
+        mail_digest_section = digest_failure_section("중요 메일 요약 섹션이 생성되지 않았다")
+    if report_time is None:
+        report_time = format_report_time(datetime.now(KST))
     after_dt = datetime.fromtimestamp(gmail_after_epoch, tz=KST)
     after_str = after_dt.strftime("%Y-%m-%d %H:%M KST")
 
@@ -145,10 +159,20 @@ Notion API로 조회했고, Shawn이 담당(`Assign`) 또는 리뷰어(`Reviewer
 프로모션 후보 ({after_str} 이후, Gmail 프로모션 탭):
 {build_promotion_candidates(cleanup)}
 
+### 중요 메일 요약 (scheduler가 이미 작성함)
+scheduler가 {after_str} 이후 받은 메일을 모두 읽고, Shawn이 확인해야 할 중요한 스레드만 골라 요약해
+아래 `<important_mail_section>`을 만들었다.
+- 4단계 보고서의 2️⃣ Gmail 섹션 맨 위에 `<important_mail_section>` 내용을 **한 글자도 바꾸지 말고 그대로** 넣는다. 태그는 넣지 않는다.
+- 항목을 추가·삭제·수정·재정렬하지 않는다. 중요 메일을 다시 고르거나 요약하지 않는다.
+- 4️⃣ 액션 가이드에서 메일 관련 항목은 이 섹션의 요약과 `👉` 할 일을 근거로 쓴다. `👉`가 없는 메일은 할 일로 만들지 않는다.
+
+<important_mail_section>
+{mail_digest_section}
+</important_mail_section>
+
 MCP gmail 도구(mcp__gmail__*)를 직접 호출하여:
-- {after_str} 이후 새 메일 검색 (after:{gmail_after_epoch})
-- 중요 메일 필터링 (is:important)
-- 미읽음 메일 요약
+- {after_str} 이후 새 메일 검색 (after:{gmail_after_epoch}) — 이 값을 그대로 쓴다
+- 각 메일의 읽음/미읽음 확인 (라벨링과 2️⃣ 새 메일 목록용)
 - **사용자 라벨이 없는 이메일에 아래 규칙에 따라 라벨 적용:**
 
 ### Gmail 라벨링 규칙 (발신자 기준)
@@ -232,7 +256,8 @@ MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **전용
 보고서 전체 구조 (아래 순서와 형식을 정확히 따를 것):
 
 *📋 Searchdoc 일일 업무 요약*
-📅 날짜와 시간을 첫 줄에 표시
+📅 {report_time}
+(위 날짜·시각 줄을 그대로 쓴다. 다른 시각으로 바꾸지 않는다.)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -241,6 +266,9 @@ MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **전용
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
 *2️⃣ Gmail*
+(2단계의 `<important_mail_section>` 내용을 그대로 넣는다)
+
+*📩 새 메일 목록*
 ⚠️ 절대 테이블 형식 사용 금지. 반드시 아래 불릿 포인트 형식으로 표시.
 새 메일이 없으면 "새 메일 없음"으로 표시.
 
@@ -269,9 +297,9 @@ MCP slack 도구(mcp__slack__slack_post_message)를 직접 호출하여 **전용
 *4️⃣ 🎯 오늘의 액션 가이드*
 1~3단계에서 수집한 정보를 종합 분석하여 아래 내용을 제공:
 🚨 *즉시 처리 필요*
-> • 오늘 마감이거나 기한 초과된 태스크, 긴급 회신 필요 메일
+> • 오늘 마감이거나 기한 초과된 태스크, 중요 메일 요약의 🔴 긴급 메일
 ⏰ *오늘 중 처리 권장*
-> • 내일 마감 태스크, 중요 메일 회신
+> • 내일 마감 태스크, 중요 메일 요약에서 `👉` 할 일이 있는 메일
 📌 *이번 주 내 처리*
 > • 곧 마감되는 태스크, 팔로업 필요 항목
 각 항목에 구체적인 행동 제안 포함 (예: "XX 메일에 YY 내용으로 회신 필요", "ZZ 태스크 상태를 In Review로 변경 권장")
@@ -309,6 +337,7 @@ def format_event(event):
 
 def run_workflow():
     """Claude CLI로 워크플로우 실행 (실시간 로그)"""
+    report_time = format_report_time(datetime.now(KST))  # 정각 실행 시각 (요약 생성에 1~2분 걸린다)
     gmail_after_epoch = int(load_last_run_timestamp())
     save_last_run_timestamp()
 
@@ -326,7 +355,15 @@ def run_workflow():
         logger.error(f"Notion Kanban 섹션 생성 실패: {e}")
         kanban_section = kanban_failure_section(str(e))
 
-    prompt = build_workflow_prompt(gmail_after_epoch, cleanup, kanban_section)
+    # 중요 메일 요약 — 정리(휴지통 이동) 뒤에 모아야 광고·알림이 빠진다
+    try:
+        mail_digest_section = format_digest_section(build_digest(gmail_after_epoch))
+    except Exception as e:  # Gmail 인증/네트워크 실패여도 보고는 보낸다
+        logger.error(f"중요 메일 요약 섹션 생성 실패: {e}")
+        mail_digest_section = digest_failure_section(str(e))
+
+    prompt = build_workflow_prompt(gmail_after_epoch, cleanup, kanban_section, mail_digest_section,
+                                   report_time)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     detail_log = os.path.join(LOG_DIR, f"workflow_{timestamp}.log")

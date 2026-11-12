@@ -31,7 +31,7 @@ sudo systemctl start|stop|restart <service>  # slack-app, scheduler, gov-funding
 /home/ubuntu/venvs/gov-funding/bin/python -m pytest tests/gov_funding
 /home/ubuntu/venvs/ai-news/bin/python -m pytest tests/ai_news
 /home/ubuntu/venvs/slack-app/bin/python -m pytest tests/slack_app
-/home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py tests/test_kanban.py
+/home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py tests/test_kanban.py tests/test_mail_digest.py
 
 # scheduler 일일 보고 1️⃣ Kanban 섹션 미리보기 (Notion 조회만, 전송 없음)
 set -a; . ./.env; set +a
@@ -39,6 +39,10 @@ set -a; . ./.env; set +a
 
 # scheduler 메일 자동 정리 미리보기 (지우지 않고 대상만 JSON 출력)
 /home/ubuntu/venvs/scheduler/bin/python -m src.scheduler.mail_cleanup --hours 72 --dry-run
+
+# scheduler 2️⃣ 중요 메일 요약 섹션 미리보기 (Gmail 읽기 + Bedrock 요약만, 메일 변경·전송 없음)
+# --show-prompt: 모델 입력(스레드별 본문)도 출력. 정리(휴지통 이동)를 거치지 않아 광고·알림이 섞인다
+/home/ubuntu/venvs/scheduler/bin/python -m src.scheduler.mail_digest --hours 16
 
 # gov-funding 수동 실행 (스케줄러 없이 1회) — systemd와 달리 .env를 직접 불러와야 한다
 set -a; . ./.env; set +a
@@ -262,8 +266,13 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
    - 삭제를 Claude에 맡기지 않는 이유: Claude가 프롬프트의 `after:` 값을 2024년 기준으로 재계산해 검색한 적이 있다 (2026-11-03~04 4회 중 3회). 같은 방식으로 지우면 범위 밖의 오래된 메일까지 지워진다
    - Gmail 프로모션 탭 메일은 정부기관 안내·서비스 공지도 섞여 있어 일괄 삭제하지 않는다. 후보 목록(ID 포함)을 프롬프트에 넣고, Claude는 그 목록 안의 광고만 `TRASH` 라벨로 옮길 수 있다
    - 인증은 gmail-mcp-server의 OAuth 토큰(`GMAIL_MCP_CREDENTIALS_PATH`, `GMAIL_MCP_TOKEN_PATH`)을 재사용한다. 정리가 실패해도 보고는 나가고, 2️⃣ Gmail 섹션에 오류가 표시된다
+   - **📌 중요 메일 요약** (2️⃣ 맨 위): 정리 다음에 `mail_digest.build_digest()`가 같은 시간 범위의 받은 메일(보낸·임시·휴지통·스팸·프로모션 탭 제외)을 본문까지 읽어 스레드로 묶고, Bedrock Sonnet 5(thinking off, structured outputs)가 중요한 스레드만 골라 `분류 · 긴급/중요 · 요약 2~3문장 · 👉 할 일`을 만든다. 섹션 문구는 코드가 완성하고 Claude CLI는 그대로 붙여 넣으며, 4️⃣ 액션 가이드의 메일 항목도 이 섹션의 👉만 근거로 쓴다. 최대 10건, 넘치면 `…외 N건`
+   - 본문은 HTML이면 블록 태그만 줄바꿈으로 바꿔 텍스트로 만들고(`get_text("\n")`은 Knox의 `--- <b>Original Message</b> ---`를 세 줄로 쪼갠다), 회신 인용(Gmail `님이 작성:`/`wrote:`, Outlook `보낸 사람:`+`보낸 날짜:`, 네이버·Knox `Original Message`)을 '새로 쓴 내용'과 분리해 넘긴다. 스레드 마지막 메일 3000자 + 인용 1500자, 앞선 메일 800자. 입력이 15만 자를 넘으면 오래된 '중요 표시 없음' 스레드부터 미리보기만 남긴다
+   - Gmail '중요' 표시는 참고로만 넘긴다. 이 메일함은 대부분 그룹 주소(bizops@ 등)로 받아 To 기준으로는 거를 수 없고, '중요' 표시는 인터넷지로 납부 결과·카드 이용내역·뉴스레터를 포함하고 AWS 지원 케이스 답변은 빠뜨린다. Notion 활동 알림(`notify@mail.notion.com`)은 Kanban 섹션과 겹치는데 프롬프트로 막아도 모델이 골라서 코드에서 제외한다
+   - Bedrock 요약이 실패하면 `⚠️ 요약 생성 실패`와 Gmail 중요 표시 스레드 목록만, Gmail 조회가 실패하면 `⚠️ 중요 메일 요약 실패`만 표시하고 보고는 계속 나간다. 비용은 실행당 입력 2만~10만 토큰 (평일 4시간 구간 ≈ 2만)
 3. **메일 초안 작성** — To에 본인 이메일이 직접 포함된 외부 발신 메일만 (절대 전송 금지, 초안만)
 4. **Slack 결과 보고** — Notion 현황 + Gmail 요약 + 초안 목록 + 오늘의 액션 가이드
+   - 첫 줄 `📅` 날짜·시각은 scheduler가 실행 시작 시각으로 넣는다 (Claude에 맡겼을 때 09:00 보고서에 `13:00 KST`를 적었다)
 
 MCP 도구: Notion, Gmail, Slack, Calendar
 
@@ -333,6 +342,7 @@ slack-bots/
 | `GMAIL_MCP_CREDENTIALS_PATH` | scheduler 메일 자동 정리용 OAuth 클라이언트 | `/home/ubuntu/mcp/gmail-mcp-server/credentials.json` |
 | `NOTION_TOKEN` | scheduler Kanban 섹션용 Notion integration 토큰 (Claude CLI Notion MCP와 같은 토큰) | (필수) |
 | `GMAIL_MCP_TOKEN_PATH` | scheduler 메일 자동 정리용 OAuth 토큰 (refresh token 사용) | `/home/ubuntu/mcp/gmail-mcp-server/gmail_token.json` |
+| `MAIL_DIGEST_MODEL_ID` | scheduler 중요 메일 요약 모델 (`BEDROCK_REGION` 사용) | `global.anthropic.claude-sonnet-5` |
 | `EMAIL_RECIPIENTS` | 이메일 수신자 (콤마 구분) | (선택) |
 | `RELEVANCE_THRESHOLD` | Bedrock 관련성 임계값 (운영 `.env` 0.7) | `0.6` |
 | `GOV_FUNDING_RUN_ON_START` | 서비스 시작 시 1회 실행 (신규만 알림) | `1` |
@@ -429,7 +439,7 @@ sudo systemctl stop scheduler            # 개별 중지
 /home/ubuntu/venvs/gov-funding/bin/python -m pytest tests/gov_funding
 /home/ubuntu/venvs/ai-news/bin/python -m pytest tests/ai_news
 /home/ubuntu/venvs/slack-app/bin/python -m pytest tests/slack_app
-/home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py tests/test_kanban.py
+/home/ubuntu/venvs/scheduler/bin/python -m pytest tests/test_scheduler.py tests/test_mail_cleanup.py tests/test_kanban.py tests/test_mail_digest.py
 
 # 개별 테스트 스크립트
 python scripts/test_bedrock.py   # Bedrock 분석 테스트
