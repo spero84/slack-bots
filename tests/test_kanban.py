@@ -12,6 +12,7 @@ from src.scheduler.kanban import (
     SHAWN_NOTION_USER_ID,
     NotionClient,
     Task,
+    EXCLUDED_STATUSES,
     build_filter,
     build_kanban_section,
     fetch_tasks,
@@ -74,6 +75,13 @@ class TestBoards:
 
     def test_상태값_Ready_Commit_형식(self):
         assert set(ACTIVE_STATUSES) == {"Ready (Commit)", "In Progress", "In Review"}
+
+    @pytest.mark.parametrize("board", [LT, MGMT, SEARCHDOC], ids=lambda b: b.name)
+    def test_Holding은_조회_조건에_없음(self, board):
+        """Holding(보류)은 Kanban 섹션과 액션 가이드 모두에서 뺀다 (2026-11-12 요구)."""
+        assert set(EXCLUDED_STATUSES).isdisjoint(ACTIVE_STATUSES)
+        statuses = [c["status"]["equals"] for c in build_filter(board)["and"][1]["or"]]
+        assert "Holding" not in statuses
 
 
 class TestParseTask:

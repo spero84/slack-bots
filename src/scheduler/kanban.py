@@ -26,7 +26,9 @@ HTTP_TIMEOUT = 30
 KST = timezone(timedelta(hours=9))
 
 SHAWN_NOTION_USER_ID = "20cd872b-594c-810b-9d99-0002e207a7c1"
-# 보고서에 표시하는 순서
+# 보고서에 표시하는 순서. Holding(보류)은 Notion에서 'In progress' 그룹이지만 보고하지 않는다 —
+# Kanban 섹션에도, 4️⃣ 액션 가이드에도 넣지 않는다 (사용자 요구, 2026-11-12). Backlogs/Done/Archive도 제외
+EXCLUDED_STATUSES = ("Holding", "Backlogs", "Done", "Archive")
 ACTIVE_STATUSES = ("In Progress", "In Review", "Ready (Commit)")
 ROLE_LABELS = {"Assign": "담당", "Reviewer": "리뷰"}
 NO_PART = "미분류"

@@ -261,6 +261,7 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
    - 보드별 속성: LT Operation은 `Assign`만 있고 Part 대신 `Work Type`을 쓴다(마감 `Start & Due Date`). Management Support는 `Assign`/`Reviewer`/`Part`/`Deadline`. Searchdoc Operation은 `Assign`/`Reviewer`/`Part`이고 마감은 `Due Date`, 비어 있으면 `Deadline`. 기간이면 end를 마감으로 본다
    - 예전에는 Claude가 Notion MCP로 직접 조회했다. 그런데 없는 `Person` 속성으로 조회해 400이 나면 조건을 임의로 바꿔 재조회했고(2026-10-28~11-04, 리뷰어로만 지정된 태스크 누락), 57KB 조회 결과를 파일로 받아 읽는 등 실행마다 결과가 달랐다. 그래서 조회를 코드로 옮겼다
    - 보드 하나가 실패하면 섹션에 `⚠️ *보드* — 보드 조회 실패`로 표시하고 나머지 보드는 그대로 보고한다. 토큰이 없으면 섹션 전체가 `Notion 조회 실패`로 나간다
+   - `Holding`(보류)은 Notion에서 'In progress' 그룹이지만 보고하지 않는다. Kanban 섹션에도 4️⃣ 액션 가이드에도 넣지 않는다 (사용자 요구, 2026-11-12 — 프롬프트에도 명시). `Backlogs`/`Done`/`Archive`도 제외 (`kanban.EXCLUDED_STATUSES`)
 2. **Gmail 확인 및 라벨링** — 최근 1시간 메일, 발신자 기준 자동 라벨링 (회의록, CSP, 청구서, 정부지원사업, VC 등)
    - **메일 자동 정리**: Claude 실행 전에 `mail_cleanup.cleanup_mailbox()`가 지난 실행 이후(최대 72시간) 메일 중 광고(제목 맨 앞 `(광고)`/`[광고]`), 미팅 거절(`거절함:`/`거절됨:`/`Declined:`), GitHub 알림(`notifications@github.com`), 보안 알림(Google `보안 알림`/`Security alert`, AWS Control Tower `aws-controltower-AggregateSecurityNotifications`)을 휴지통으로 옮긴다. Gmail 검색어로 찾은 뒤 발신자·제목·수신 시각을 코드에서 다시 확인한다. 별표/보낸/임시보관 메일은 지우지 않는다. Google `중요 보안 알림`과 `noreply@github.com`(인증 코드 등)도 남긴다
    - 삭제를 Claude에 맡기지 않는 이유: Claude가 프롬프트의 `after:` 값을 2024년 기준으로 재계산해 검색한 적이 있다 (2026-11-03~04 4회 중 3회). 같은 방식으로 지우면 범위 밖의 오래된 메일까지 지워진다

@@ -224,6 +224,12 @@ class TestKanbanPromptIntegration:
         prompt = build_workflow_prompt(1740000000)
         assert "Notion 조회 실패" in prompt
 
+    def test_Holding_태스크는_액션_가이드에서_제외(self):
+        prompt = build_workflow_prompt(1740000000, kanban_section=self.SECTION)
+        assert "`Holding`(보류) 상태인 태스크는 이 섹션에 없다" in prompt
+        guide = prompt[prompt.index("*4️⃣ 🎯 오늘의 액션 가이드*"):]
+        assert "`Holding` 보류 태스크는 넣지 않는다" in guide
+
 
 class TestMailDigestPromptIntegration:
     """2단계: scheduler가 만든 중요 메일 요약 섹션과 보고서 시각을 Claude가 그대로 넣도록 하는 프롬프트 테스트"""
