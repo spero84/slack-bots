@@ -83,7 +83,10 @@ _DECODE_REQ = (
 )
 _HANGUL_RE = re.compile(r"[가-힣]")
 _BAD_TITLE_RE = re.compile(r"^(untitled|속보서비스|.{0,3})$", re.IGNORECASE)
-_STALE_CANARY_MIN_ITEMS = 5
+_STALE_CANARY_MIN_ITEMS = 10
+# 190자 제한 뒤로 진짜 잘림은 일어나지 않는다. 잘린 쿼리는 결과 대부분(실측 64/67, 71/77)이 기간 밖이었고,
+# 본문 매칭 쿼리(RAG)는 몇 건 안 되는 결과 중 옛 기사가 섞이는 일이 흔하다 (2026-11-13 4/7건 오탐)
+_STALE_CANARY_RATIO = 0.7
 
 
 class GoogleThrottled(RuntimeError):
@@ -653,7 +656,7 @@ def search_all(now: datetime, days_by_region: dict[Region, int], hours: Optional
             if query.open and stat.raw >= 100:
                 # 관련도순 100건 한도 — 일부 기사가 밀려났을 수 있다 (쿼리를 나누거나 기간을 줄일 때)
                 logger.warning(f"매체 무관 검색 결과가 100건 한도에 닿음: {query.q}")
-            if stat.raw >= _STALE_CANARY_MIN_ITEMS and stat.stale * 2 > stat.raw:
+            if stat.raw >= _STALE_CANARY_MIN_ITEMS and stat.stale > stat.raw * _STALE_CANARY_RATIO:
                 stale_queries.append(f"{query.region.value}/{query.kind}")
                 logger.error(f"when: 무시 의심 ({stat.stale}/{stat.raw}건이 기간 밖) — q 길이 확인: {query.q}")
             logger.info(f"[{query.region.value}/{query.kind}] {stat.outlets}: {stat.raw}건 중 {stat.kept}건 통과")

@@ -387,16 +387,20 @@ def run_workflow(dry_run: bool = False, hours: Optional[float] = None, use_llm: 
             logger.info(f"수집 완료 — {post_at.astimezone(KST):%H:%M} KST 게시까지 {wait / 60:.1f}분 대기")
             sleep(wait)
     notifier = notifier or SlackNotifier()
-    delivered = notifier.send(messages)
-    sent_ok = 0 in delivered
-    result["notification"] = sent_ok
-    if sent_ok and report_html is not None:
-        # HTML 정리본은 본문 메시지 스레드에 (실패해도 본문·이력에는 영향 없음)
+    if report_html is not None:
+        # HTML 정리본을 먼저 채널에 올리고, 바로 아래에 브리핑 메시지 (사용자 요청 2026-11-13 — 이전에는 메시지 스레드에).
+        # 업로드가 실패해도 브리핑은 보낸다 (이력에는 영향 없음)
         run_day = now.astimezone(KST)
         result["html_uploaded"] = notifier.upload_file(
             report_html.encode("utf-8"), f"aec-news-{run_day:%Y%m%d}.html",
-            f"EPC·AEC × AI 데일리 {run_day:%Y-%m-%d}", thread_ts=getattr(notifier, "last_ts", None),
-            comment="📄 오늘 브리핑 HTML 정리본 — 내려받아 브라우저로 열면 섹션별로 정리된 화면으로 볼 수 있습니다")
+            f"EPC·AEC × AI 데일리 {run_day:%Y-%m-%d}",
+            comment=f"📄 *EPC·AEC × AI 데일리 {run_day:%m/%d} HTML 정리본* — 내려받아 브라우저로 열면 섹션별로 볼 수 "
+                    "있습니다. 오늘 브리핑은 바로 아래 메시지입니다")
+        if result["html_uploaded"]:
+            sleep(2)   # 파일 공유가 채널에 먼저 나타나도록 잠깐 둔다
+    delivered = notifier.send(messages)
+    sent_ok = 0 in delivered
+    result["notification"] = sent_ok
     if sent_ok and len(delivered) < len(messages):
         result["warnings"].append(f"Slack 스레드 답글 {len(messages) - len(delivered)}개 전송 실패")
     if use_llm:

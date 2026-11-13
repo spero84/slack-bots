@@ -286,7 +286,7 @@ def test_search_all_stops_after_throttle_and_warns():
 
 def test_search_all_warns_on_stale_flood_and_empty_health():
     old = rss(*[(f"도면 AI 옛 기사 {i} - 동아일보", "https://www.donga.com", "동아일보", pub(24 * 400), f"O{i}")
-                for i in range(6)])
+                for i in range(12)])
     empty = rss()
     queries = gn.build_queries(ALL_DAYS)
     responses = [FakeResp(200, content=old if n == 0 else empty) for n in range(len(queries))]
@@ -689,3 +689,17 @@ def test_google_cookies_persist_between_runs(tmp_path):
     client.save_cookies()
     again = gn.GoogleNewsClient(interval=0, cookie_path=path)
     assert {c.name: c.value for c in again.session.cookies} == {"NID": "abc"}
+
+
+
+def test_few_stale_items_in_small_result_do_not_warn():
+    # 2026-11-13 실측 오탐: 본문 매칭 RAG 쿼리 7건 중 4건이 기간 밖 — 잘린 쿼리가 아니다
+    mixed = rss(*[(f"RAG 건설 {i} - 대한경제", "https://www.dnews.co.kr", "대한경제", pub(24 * (400 if i < 4 else 0.5)),
+                   f"M{i}") for i in range(7)])
+    queries = gn.build_queries(ALL_DAYS)
+    responses = [FakeResp(200, content=mixed if n == 0 else rss(("AI 기사 - 동아일보", "https://www.donga.com", "동아일보",
+                                                                    pub(1), f"H{n}")))
+                 for n in range(len(queries))]
+    client, _, _ = make_client(responses)
+    result = gn.search_all(NOW, ALL_DAYS, client=client)
+    assert not any("검색 기간 조건이 무시" in w for w in result.warnings)

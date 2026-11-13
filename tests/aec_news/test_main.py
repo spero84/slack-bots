@@ -30,18 +30,21 @@ class FakeNotifier:
         self.fail_indices = set(fail_indices)
         self.sent = []
         self.uploads = []
+        self.events = []
         self.upload_ok = upload_ok
         self.last_ts = None
 
     def send(self, messages):
         self.sent.append(messages)
+        self.events.append("send")
         if not self.ok:
             return []
         self.last_ts = "111.222"
         return [i for i in range(len(messages)) if i not in self.fail_indices]
 
     def upload_file(self, content, filename, title, thread_ts=None, comment=""):
-        self.uploads.append({"content": content, "filename": filename, "thread_ts": thread_ts})
+        self.events.append("upload")
+        self.uploads.append({"content": content, "filename": filename, "thread_ts": thread_ts, "comment": comment})
         return self.upload_ok
 
 
@@ -103,6 +106,7 @@ def pipeline(monkeypatch, tmp_path):
 
 def run(p, notifier=None, **kw):
     kw.setdefault("fetcher", FakeFetcher({}))   # 원문 받기는 네트워크를 타지 않게
+    kw.setdefault("sleep", lambda sec: None)     # HTML 업로드 뒤 대기·게시 시각 대기를 건너뛴다
     return m.run_workflow(now=kw.pop("now", NOW), state=p.state(), client=FakeClient(),
                           notifier=notifier or FakeNotifier(), **kw)
 
@@ -538,16 +542,21 @@ def test_body_checks_prefer_korean_candidates(monkeypatch):
 
 # --- HTML 정리본 ---
 
-def test_html_report_uploaded_in_thread_after_send(pipeline):
+def test_html_report_posted_first_then_digest(pipeline):
     pipeline.found.append(make_item(1, title="관련 도면 AI <특집> & 분석"))
     notifier = FakeNotifier()
-    result = run(pipeline, notifier)
-    assert result["html_uploaded"] is True
+    slept = []
+    result = run(pipeline, notifier, sleep=slept.append)
+    assert notifier.events == ["upload", "send"]                 # HTML 파일이 먼저, 브리핑 메시지가 바로 아래
+    assert result["html_uploaded"] is True and slept == [2]
     up = notifier.uploads[0]
-    assert up["thread_ts"] == "111.222" and up["filename"] == "aec-news-20261113.html"
+    assert up["thread_ts"] is None and up["filename"] == "aec-news-20261113.html"   # 스레드가 아니라 채널에
+    assert "바로 아래 메시지" in up["comment"]
     page = up["content"].decode("utf-8")
     assert "관련 도면 AI &lt;특집&gt; &amp; 분석" in page        # 제목 이스케이프
     assert "<script" not in page                                # 외부·인라인 스크립트 없음
+    header = notifier.sent[0][0].blocks[2]["elements"][0]["text"]
+    assert "HTML 정리본은 바로 위 파일" in header
 
 
 def test_html_upload_failure_does_not_affect_history(pipeline):
@@ -557,11 +566,13 @@ def test_html_upload_failure_does_not_affect_history(pipeline):
     assert pipeline.state().was_sent([make_item(1, title="관련 도면 AI").title_key])
 
 
-def test_no_upload_when_main_message_fails(pipeline):
+def test_digest_still_sent_when_html_upload_fails(pipeline):
     pipeline.found.append(make_item(1, title="관련 도면 AI"))
-    notifier = FakeNotifier(ok=False)
-    run(pipeline, notifier)
-    assert notifier.uploads == []
+    notifier = FakeNotifier(upload_ok=False)
+    slept = []
+    result = run(pipeline, notifier, sleep=slept.append)
+    assert notifier.events == ["upload", "send"] and result["notification"] is True
+    assert slept == []                                          # 업로드가 실패하면 기다리지 않는다
 
 
 def test_html_can_be_disabled(pipeline, monkeypatch):
@@ -633,11 +644,11 @@ def test_scheduled_post_time_and_wait(pipeline):
     future = datetime.now(timezone.utc) + timedelta(minutes=12)
     notifier = FakeNotifier()
     run(pipeline, notifier, post_at=future, sleep=slept.append)
-    assert len(slept) == 1 and 700 <= slept[0] <= 721                   # 게시 시각까지 기다린 뒤
+    assert len(slept) == 2 and 700 <= slept[0] <= 721 and slept[1] == 2  # 게시 시각까지 기다린 뒤 (HTML 업로드 후 2초)
     assert len(notifier.sent) == 1                                      # 보낸다
     slept.clear()
     run(pipeline, FakeNotifier(), post_at=datetime.now(timezone.utc) - timedelta(minutes=5), sleep=slept.append)
-    assert slept == []                                                  # 늦으면 바로 보낸다
+    assert slept == [2]                                                 # 늦으면 바로 보낸다 (HTML 업로드 후 2초만)
 
 
 def test_scheduler_starts_collection_lead_minutes_before_post(monkeypatch):

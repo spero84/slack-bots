@@ -35,7 +35,7 @@ class DigestContext:
     candidates: int = 0                 # AI 판정에 넘긴 후보 수
     warnings: list[str] = field(default_factory=list)
     repeats_skipped: int = 0            # 이미 보낸 소식의 다른 매체 기사라 뺀 수
-    html_attached: bool = False         # HTML 정리본을 스레드에 올리는지 (머리말에 안내)
+    html_attached: bool = False         # HTML 정리본을 이 메시지 바로 위에 올리는지 (머리말에 안내)
 
     def period_text(self) -> str:
         if self.hours is not None:
@@ -260,7 +260,7 @@ def build_messages(
             f"검색 기간 {ctx.period_text()} · 언론사 {outlet_scope_text()} + 매체 무관 검색"
             + (f" · 경쟁사 {len(COMPETITORS)}곳" if COMPETITORS else "")
             + " · 키워드 EPC·AECO × AI/RAG, BIM·설계·도면 AI, 문서 AI, ConTech·스마트건설"
-            + (" · 📄 HTML 정리본은 스레드에 있습니다" if ctx.html_attached else "")
+            + (" · 📄 HTML 정리본은 바로 위 파일" if ctx.html_attached else "")
         )}]},
     ]
 
