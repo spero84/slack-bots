@@ -7,7 +7,7 @@ Slack 기반 업무 자동화 시스템 (정부 지원사업 모니터링, AI �
 | 서비스 | 엔트리포인트 | venv | 스케줄 |
 |--------|-------------|------|--------|
 | slack-app | `src.slack_app.app` | `/home/ubuntu/venvs/slack-app` | 상시 (Socket Mode) |
-| scheduler | `src.scheduler.scheduler` | `/home/ubuntu/venvs/scheduler` | 평일 9,13,17시 |
+| scheduler | `src.scheduler.scheduler` | `/home/ubuntu/venvs/scheduler` | 평일 9,15시 |
 | gov-funding | `src.gov_funding.main` | `/home/ubuntu/venvs/gov-funding` | 매일 9시 |
 | ai-news | `src.ai_news.main` | `/home/ubuntu/venvs/ai-news` | 월/수/금 8시 |
 | aec-news | `src.aec_news.main` | `/home/ubuntu/venvs/aec-news` | 매일 7:30 수집 시작 · 8:30 게시 |
@@ -313,7 +313,7 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
 
 ### Scheduler Workflow
 
-4단계 워크플로우 (평일 9, 13, 17시, 채널 `C0AEW7LF0RJ`):
+4단계 워크플로우 (평일 9, 15시 — 2026-11-13 사용자 요청으로 하루 3회(9·13·17)에서 2회로, 채널 `C0AEW7LF0RJ`):
 
 1. **Notion Kanban** — Claude 실행 전에 `kanban.build_kanban_section()`이 Notion API(`NOTION_TOKEN`, `Notion-Version: 2025-09-03` data_sources)로 3개 보드를 조회하고, Shawn이 `Assign`/`Reviewer`인 Ready (Commit)/In Progress/In Review 태스크만 코드에서 다시 골라 1️⃣ 섹션 문구를 완성한다. Claude는 이 섹션을 그대로 넣고 Notion을 다시 조회하지 않는다. 각 줄은 `` `Part` *제목* — 보드 · 역할(담당/리뷰) · 마감(초과 일수) `` 형식이다
    - 보드별 속성: LT Operation은 `Assign`만 있고 Part 대신 `Work Type`을 쓴다(마감 `Start & Due Date`). Management Support는 `Assign`/`Reviewer`/`Part`/`Deadline`. Searchdoc Operation은 `Assign`/`Reviewer`/`Part`이고 마감은 `Due Date`, 비어 있으면 `Deadline`. 기간이면 end를 마감으로 본다
@@ -328,7 +328,7 @@ K-Startup > Bizinfo > NIPA > NIA > IITP > JOINTIPS > MSIT > MSS > MOTIE
    - **📌 중요 메일 요약** (2️⃣ 맨 위): 정리 다음에 `mail_digest.build_digest()`가 같은 시간 범위의 받은 메일(보낸·임시·휴지통·스팸·프로모션 탭 제외)을 본문까지 읽어 스레드로 묶고, Bedrock Sonnet 5(thinking off, structured outputs)가 중요한 스레드만 골라 `분류 · 긴급/중요 · 요약 2~3문장 · 👉 할 일`을 만든다. 섹션 문구는 코드가 완성하고 Claude CLI는 그대로 붙여 넣으며, 4️⃣ 액션 가이드의 메일 항목도 이 섹션의 👉만 근거로 쓴다. 최대 10건, 넘치면 `…외 N건`
    - 본문은 HTML이면 블록 태그만 줄바꿈으로 바꿔 텍스트로 만들고(`get_text("\n")`은 Knox의 `--- <b>Original Message</b> ---`를 세 줄로 쪼갠다), 회신 인용(Gmail `님이 작성:`/`wrote:`, Outlook `보낸 사람:`+`보낸 날짜:`, 네이버·Knox `Original Message`)을 '새로 쓴 내용'과 분리해 넘긴다. 스레드 마지막 메일 3000자 + 인용 1500자, 앞선 메일 800자. 입력이 15만 자를 넘으면 오래된 '중요 표시 없음' 스레드부터 미리보기만 남긴다
    - Gmail '중요' 표시는 참고로만 넘긴다. 이 메일함은 대부분 그룹 주소(bizops@ 등)로 받아 To 기준으로는 거를 수 없고, '중요' 표시는 인터넷지로 납부 결과·카드 이용내역·뉴스레터를 포함하고 AWS 지원 케이스 답변은 빠뜨린다. Notion 활동 알림(`notify@mail.notion.com`)은 Kanban 섹션과 겹치는데 프롬프트로 막아도 모델이 골라서 코드에서 제외한다
-   - Bedrock 요약이 실패하면 `⚠️ 요약 생성 실패`와 Gmail 중요 표시 스레드 목록만, Gmail 조회가 실패하면 `⚠️ 중요 메일 요약 실패`만 표시하고 보고는 계속 나간다. 비용은 실행당 입력 2만~10만 토큰 (평일 4시간 구간 ≈ 2만)
+   - Bedrock 요약이 실패하면 `⚠️ 요약 생성 실패`와 Gmail 중요 표시 스레드 목록만, Gmail 조회가 실패하면 `⚠️ 중요 메일 요약 실패`만 표시하고 보고는 계속 나간다. 비용은 실행당 입력 2만~10만 토큰 (평일 9→15시 6시간 구간 ≈ 3만, 15시→다음날 9시 18시간 구간은 더 크다)
 3. **메일 초안 작성** — To에 본인 이메일이 직접 포함된 외부 발신 메일만 (절대 전송 금지, 초안만)
 4. **Slack 결과 보고** — Notion 현황 + Gmail 요약 + 초안 목록 + 오늘의 액션 가이드
    - 첫 줄 `📅` 날짜·시각은 scheduler가 실행 시작 시각으로 넣는다 (Claude에 맡겼을 때 09:00 보고서에 `13:00 KST`를 적었다)

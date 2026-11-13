@@ -273,3 +273,23 @@ class TestFormatReportTime:
             "2026년 11월 12일 (목) 09:00 KST"
         assert format_report_time(datetime(2026, 3, 2, 4, 0, tzinfo=timezone.utc)) == \
             "2026년 3월 2일 (월) 13:00 KST"
+
+
+def test_schedule_is_twice_on_weekdays_9_and_15(monkeypatch):
+    """평일 하루 2회 — 오전 9시, 오후 3시 (2026-11-13 사용자 요청)"""
+    import src.scheduler.scheduler as sch
+    added = {}
+
+    class FakeScheduler:
+        def add_job(self, func, trigger, **kw):
+            added["func"], added["trigger"] = func, trigger
+
+        def start(self):
+            added["started"] = True
+
+    monkeypatch.setattr(sch, "BlockingScheduler", FakeScheduler)
+    monkeypatch.setattr(sch, "run_workflow", lambda: added.setdefault("ran_on_start", True))
+    sch.main()
+    fields = {f.name: str(f) for f in added["trigger"].fields}
+    assert fields["hour"] == "9,15" and fields["minute"] == "0" and fields["day_of_week"] == "mon-fri"
+    assert added["ran_on_start"] and added["started"]

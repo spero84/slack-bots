@@ -28,6 +28,7 @@ CLAUDE_PATH = os.path.join(HOME_DIR, ".local", "bin", "claude")
 LAST_RUN_FILE = os.path.join(LOG_DIR, "scheduler_last_run.json")
 DEFAULT_LOOKBACK_SECONDS = 86400   # 파일 없을 때 기본 24시간
 MAX_LOOKBACK_SECONDS = 259200      # 최대 72시간 (주말 커버)
+SCHEDULE_HOURS = '9,15'            # 평일 실행 시각 (KST) — 오전 9시, 오후 3시
 
 KST = timezone(timedelta(hours=9))
 WEEKDAYS_KO = "월화수목금토일"
@@ -433,15 +434,15 @@ def run_workflow():
 def main():
     scheduler = BlockingScheduler()
 
-    # 평일 하루 3회 실행 (9, 13, 17시)
+    # 평일 하루 2회 실행 — 오전 9시, 오후 3시 (사용자 요청 2026-11-13, 이전 9·13·17시)
     scheduler.add_job(
         run_workflow,
-        CronTrigger(day_of_week='mon-fri', hour='9,13,17', minute=0, timezone='Asia/Seoul'),
+        CronTrigger(day_of_week='mon-fri', hour=SCHEDULE_HOURS, minute=0, timezone='Asia/Seoul'),
         id='hourly_workflow',
-        name='Daily Task Workflow (3x)'
+        name='Daily Task Workflow (2x)'
     )
 
-    logger.info("스케줄러 시작: 평일 하루 3회 (9, 13, 17시)")
+    logger.info("스케줄러 시작: 평일 하루 2회 (9, 15시)")
     logger.info("즉시 1회 테스트 실행...")
     run_workflow()
 

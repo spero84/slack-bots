@@ -52,7 +52,7 @@ Claude CLI를 subprocess로 호출하여 Slack 메시지에 응답하는 봇.
 
 Claude CLI로 Notion Kanban 확인, Gmail 요약/초안 작성, Slack 보고를 자동 실행.
 
-- 스케줄: 평일 9, 13, 17시 (APScheduler, Asia/Seoul)
+- 스케줄: 평일 9, 15시 (APScheduler, Asia/Seoul)
 - MCP 도구: Notion, Gmail, Slack, Calendar
 - venv: `/home/ubuntu/venvs/scheduler`
 
