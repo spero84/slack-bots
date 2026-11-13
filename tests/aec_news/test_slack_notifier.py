@@ -49,7 +49,7 @@ def test_empty_digest_still_reports_run():
     text = all_text(messages)
     assert "새 소식 없음" in text
     assert "11/13(금)" in text
-    assert "국내 최근 2일 · 미국/싱가포르 최근 7일" in text
+    assert "국내 최근 2일 · 해외 최근 7일" in text
 
 
 def test_regions_and_summaries_rendered():
@@ -246,3 +246,32 @@ def test_same_story_links_capped():
 def test_repeats_note_in_footer():
     ctx = DigestContext(run_at=CTX.run_at, days_by_region=CTX.days_by_region, repeats_skipped=4)
     assert "다른 매체가 쓴 기사 4건은 뺐습니다" in all_text(build_messages([], [], ctx))
+
+
+def test_upload_file_uses_external_upload_flow():
+    calls = []
+
+    def fake_post(url, headers=None, data=None, files=None, json=None, timeout=None):
+        calls.append((url, data, files))
+        if url.endswith("files.getUploadURLExternal"):
+            return FakeResponse({"ok": True, "upload_url": "https://files.slack.com/upload/v1/abc", "file_id": "F123"})
+        if url.startswith("https://files.slack.com/"):
+            return FakeResponse({}, status=200)
+        return FakeResponse({"ok": True})
+
+    notifier = SlackNotifier(bot_token="xoxb-test", channel_id="C0CGZRXP5JS")
+    with patch("src.aec_news.slack_notifier.requests.post", side_effect=fake_post):
+        ok = notifier.upload_file(b"<html></html>", "aec-news-20261114.html", "EPC 데일리", thread_ts="1.2",
+                                  comment="📄 HTML")
+    assert ok
+    assert calls[0][1] == {"filename": "aec-news-20261114.html", "length": "13"}
+    assert calls[1][0] == "https://files.slack.com/upload/v1/abc" and calls[1][2]["file"][0] == "aec-news-20261114.html"
+    done = calls[2][1]
+    assert done["channel_id"] == "C0CGZRXP5JS" and done["thread_ts"] == "1.2" and '"id": "F123"' in done["files"]
+
+
+def test_upload_file_failure_returns_false():
+    notifier = SlackNotifier(bot_token="xoxb-test", channel_id="C1")
+    with patch("src.aec_news.slack_notifier.requests.post",
+               return_value=FakeResponse({"ok": False, "error": "missing_scope"})):
+        assert notifier.upload_file(b"x", "a.html", "t") is False

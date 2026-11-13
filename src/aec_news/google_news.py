@@ -16,8 +16,10 @@ Google 호출을 모두 멈춘다 (재시도하면 차단이 길어진다).
 import base64
 import calendar
 import html
+import http.cookiejar
 import json
 import math
+import os
 import random
 import re
 import time
@@ -42,22 +44,36 @@ from .config import (
     OUTLETS,
     SEARCH_KIND_THEME,
     SEARCH_TERMS,
+    WEB_QUERIES,
     Competitor,
     Outlet,
     get_config,
+    outlet_takes_kind,
 )
 from .logger import logger
-from .models import NewsItem, Region
+from .models import KOREAN_REGIONS, NewsItem, Region
 
 SEARCH_URL = "https://news.google.com/rss/search"
 ARTICLE_URL = "https://news.google.com/rss/articles/{aid}"   # /read/ 경로는 실측 중 429(sorry)를 받았다
 BATCH_URL = "https://news.google.com/_/DotsSplashUi/data/batchexecute"
 TIMEOUT = (5, 20)
 RETRY_BACKOFF = (10, 30)
+# 브라우저와 같은 일관된 헤더 (한 실행 동안 바꾸지 않는다 — 요청마다 바뀌는 헤더가 오히려 자동화로 보인다)
 HEADERS = {
-    "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"),
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate",
+    "Upgrade-Insecure-Requests": "1",
+}
+# 지역판별 Accept-Language (한국어판은 한국어 우선, 영어판은 영어 우선 — 사람이 그 판을 볼 때의 브라우저 설정)
+EDITION_LANGUAGE = {
+    "ko": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "en-US": "en-US,en;q=0.9,ko;q=0.6",
+    "en-GB": "en-GB,en;q=0.9,en-US;q=0.8,ko;q=0.6",
+    "en-IN": "en-IN,en;q=0.9,en-US;q=0.8,ko;q=0.6",
+    "en-SG": "en-SG,en;q=0.9,en-US;q=0.8,ko;q=0.6",
 }
 _SG_RE = re.compile(r'data-n-a-sg="([^"]+)"')
 _TS_RE = re.compile(r'data-n-a-ts="(\d+)"')
@@ -84,6 +100,7 @@ class SearchQuery:
     outlet_keys: tuple[str, ...]  # 경쟁사 검색은 (경쟁사 키,)
     days: int
     edition: str = "en-US"       # config.EDITIONS 키
+    open: bool = False           # 매체 무관 검색 (site: 없음 — 목록 밖 매체는 🔎 기타 매체 섹션으로)
 
     @property
     def url(self) -> str:
@@ -134,6 +151,9 @@ def build_queries(days_by_region: dict[Region, int]) -> list[SearchQuery]:
             if not terms:
                 continue
             for edition, members in by_edition.items():
+                members = [o for o in members if outlet_takes_kind(o, kind)]
+                if not members:
+                    continue
                 for group in pack_outlets(terms, members, days):
                     queries.append(SearchQuery(kind, region, _compose(terms, group, days),
                                                tuple(o.key for o in group), days, edition))
@@ -148,6 +168,19 @@ def build_queries(days_by_region: dict[Region, int]) -> list[SearchQuery]:
             raise ValueError(f"점검 쿼리 언론사는 지역판이 같아야 한다: {keys}")
         queries.append(SearchQuery("health", region, _compose(terms, group, 1),
                                    tuple(o.key for o in group), 1, editions.pop()))
+    return queries
+
+
+def build_web_queries(days_override: Optional[int] = None, specs=WEB_QUERIES) -> list[SearchQuery]:
+    """매체 무관 검색 — `{검색어} when:Nd` (site: 없음)"""
+    queries: list[SearchQuery] = []
+    for terms, edition, days, kind in specs:
+        days = days_override or days
+        q = f"{terms} when:{days}d"
+        if len(q) > MAX_QUERY_CHARS:
+            raise ValueError(f"매체 무관 검색어가 너무 길다 ({len(q)}자): {q}")
+        region = Region.WEB_KR if edition == "ko" else Region.WEB_GLOBAL
+        queries.append(SearchQuery(kind, region, q, (), days, edition, open=True))
     return queries
 
 
@@ -166,26 +199,81 @@ def build_competitor_queries(days: int, specs=COMPETITOR_QUERIES) -> list[Search
 # --- HTTP 클라이언트 (간격 제한 + 차단 감지) ---
 
 class GoogleNewsClient:
-    """news.google.com 요청을 한 줄로 세운다 (간격, 재시도, 차단 시 즉시 중단)"""
+    """news.google.com 요청을 사람이 브라우저로 보는 속도로 한 줄로 세운다 (사용자 요청 2026-11-13)
+
+    - 요청 간격: 매번 무작위 gap_min~gap_max초 (기본 4~9초). 일정한 간격은 자동화로 보인다
+    - 12~20회마다 25~60초 '읽는 시간' 휴식
+    - 기사 링크를 열면(원문 URL 복원) 페이지 GET 뒤 0.6~1.6초 있다가 이어지는 POST (브라우저 스크립트가 도는 시간)
+    - 같은 브라우저 헤더 + 지역판별 Accept-Language, Google 쿠키를 실행 사이에 유지 (돌아온 브라우저처럼)
+    - 429/503/google.com/sorry(캡차)/동의 페이지를 받으면 그 실행의 Google 호출을 모두 멈춘다 (재시도하지 않는다).
+      캡차를 풀거나 IP를 바꾸는 식으로 우회하지 않는다
+    interval=0이면 대기 없이 (테스트용).
+    """
 
     def __init__(self, session: Optional[requests.Session] = None, interval: Optional[float] = None,
-                 sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic):
+                 sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
+                 rng: Optional[random.Random] = None, cookie_path: Optional[str] = None):
+        config = get_config()
         self.session = session or requests.Session()
         self.session.headers.update(HEADERS)
-        self.interval = get_config().request_interval if interval is None else interval
+        self.human = interval is None or interval > 0
+        self.gap = (config.gap_min, config.gap_max) if interval is None else (interval, interval + 1.0)
+        self.break_every = config.break_every
+        self.break_secs = config.break_secs
+        self.rng = rng or random.Random()
         self._sleep = sleep
         self._monotonic = monotonic
         self._last: Optional[float] = None
+        self._since_break = 0
+        self._next_break = self.rng.randint(*self.break_every)
         self.tripped: Optional[str] = None     # 차단 사유 (있으면 이후 호출 전부 거부)
         self.requests = 0
+        self.cookie_path = cookie_path
+        if cookie_path and session is None:
+            self._load_cookies()
+
+    # --- 쿠키 (실행 사이 유지) ---
+
+    def _load_cookies(self):
+        jar = http.cookiejar.LWPCookieJar(self.cookie_path)
+        try:
+            jar.load(ignore_discard=True, ignore_expires=False)
+        except (OSError, http.cookiejar.LoadError):
+            pass
+        self.session.cookies = jar
+
+    def save_cookies(self):
+        jar = self.session.cookies
+        if not self.cookie_path or not isinstance(jar, http.cookiejar.LWPCookieJar):
+            return
+        try:
+            os.makedirs(os.path.dirname(self.cookie_path), exist_ok=True)
+            jar.save(ignore_discard=True, ignore_expires=False)
+        except OSError as e:
+            logger.warning(f"Google 쿠키 저장 실패: {e}")
 
     def _wait(self):
-        if self._last is not None and self.interval > 0:
-            gap = self.interval + random.uniform(0, 1.0)
+        if not self.human:
+            self._last = self._monotonic()
+            return
+        if self._last is not None:
+            gap = self.rng.uniform(*self.gap)
+            self._since_break += 1
+            if self._since_break >= self._next_break:
+                rest = self.rng.uniform(*self.break_secs)
+                logger.info(f"Google News: {self._since_break}회 요청 뒤 {rest:.0f}초 쉼")
+                gap += rest
+                self._since_break = 0
+                self._next_break = self.rng.randint(*self.break_every)
             remaining = self._last + gap - self._monotonic()
             if remaining > 0:
                 self._sleep(remaining)
         self._last = self._monotonic()
+
+    def pause(self, low: float, high: float):
+        """짧은 사람 같은 멈춤 (기사 페이지를 연 뒤 등)"""
+        if self.human:
+            self._sleep(self.rng.uniform(low, high))
 
     def _check_block(self, resp: requests.Response):
         final = resp.url or ""
@@ -204,10 +292,13 @@ class GoogleNewsClient:
             logger.error(f"Google News 차단 감지: {reason} — 이번 실행의 Google 호출을 중단")
             raise GoogleThrottled(reason)
 
-    def request(self, method: str, url: str, *, paced: bool = True, **kwargs) -> requests.Response:
+    def request(self, method: str, url: str, *, paced: bool = True, edition: Optional[str] = None,
+                **kwargs) -> requests.Response:
         """네트워크 오류·5xx(503 제외)는 10초, 30초 뒤 두 번 재시도. 차단 신호는 재시도하지 않는다."""
         if self.tripped:
             raise GoogleThrottled(self.tripped)
+        if edition in EDITION_LANGUAGE:
+            kwargs["headers"] = {**kwargs.get("headers", {}), "Accept-Language": EDITION_LANGUAGE[edition]}
         attempts = len(RETRY_BACKOFF) + 1
         for attempt in range(attempts):
             if paced:
@@ -250,7 +341,8 @@ class GoogleNewsClient:
                 return None
             payload = json.dumps([[["Fbv4je", _DECODE_REQ.format(aid=aid, ts=ts.group(1), sg=sg.group(1)),
                                     None, "generic"]]])
-            # 서명은 이 GET의 ts에 묶여 있어 바로 이어서 POST한다 (간격 대기 없음)
+            # 서명은 이 GET의 ts에 묶여 있어 곧바로 POST한다 — 브라우저에서 페이지 스크립트가 도는 만큼만 (0.6~1.6초)
+            self.pause(0.6, 1.6)
             resp = self.request("POST", BATCH_URL, paced=False, data={"f.req": payload},
                                 headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
             if resp.status_code != 200:
@@ -445,8 +537,9 @@ def parse_feed(content: bytes, query: SearchQuery, window_start: datetime, now: 
             continue
         competitor_search = query.kind == "competitor"
         source_title = (source.get("title") or "").strip()
-        if competitor_search:
-            # 경쟁사 소식은 업계지·보도자료에 많아 언론사 목록 밖도 받는다. 목록 언론사의 잡음 하위 도메인만 뺀다
+        if competitor_search or query.open:
+            # 경쟁사·매체 무관 검색은 언론사 목록 밖도 받는다. 목록 언론사의 잡음 하위 도메인·차단 출처만 뺀다.
+            # 목록 언론사 기사는 그 언론사 섹션으로 (매체 무관 검색이 site: 검색과 같은 기사를 찾으면 한 건으로 합쳐진다)
             outlet = match_outlet(host, None)
             if outlet is None and (not host or is_outlet_noise_host(host) or is_blocked_competitor_host(host)):
                 continue
@@ -465,7 +558,7 @@ def parse_feed(content: bytes, query: SearchQuery, window_start: datetime, now: 
             continue
         if not competitor_search:
             has_hangul = bool(_HANGUL_RE.search(title))
-            if (query.region == Region.KR) != has_hangul:
+            if (query.region in KOREAN_REGIONS) != has_hangul:
                 continue   # 국내 검색의 영어 제목(영문판) / 해외 검색의 한글 제목은 버린다
         google_id = entry.get("id") or article_id(entry.get("link", "")) or entry.get("link", "")
         items.append(NewsItem(
@@ -506,7 +599,7 @@ class SearchResult:
 
 def lookback_days(region: Region, last_success: Optional[datetime], now: datetime, config) -> int:
     """국가별 검색 기간(일). 기본 국내 2일·해외 7일, 마지막 성공 후 더 지났으면 늘린다 (최대 7일)."""
-    base = config.kr_lookback_days if region == Region.KR else config.intl_lookback_days
+    base = config.kr_lookback_days if region in KOREAN_REGIONS else config.intl_lookback_days
     if last_success is not None:
         gap_days = math.ceil(max(0.0, (now - last_success).total_seconds()) / 86400) + 1
         base = max(base, gap_days)
@@ -514,7 +607,8 @@ def lookback_days(region: Region, last_success: Optional[datetime], now: datetim
 
 
 def search_all(now: datetime, days_by_region: dict[Region, int], hours: Optional[float] = None,
-               client: Optional[GoogleNewsClient] = None, competitor_days: Optional[int] = None) -> SearchResult:
+               client: Optional[GoogleNewsClient] = None, competitor_days: Optional[int] = None,
+               web: bool = False) -> SearchResult:
     """모든 쿼리를 순서대로 실행. 쿼리 하나의 실패는 건너뛰고, 차단이면 나머지를 모두 건너뛴다.
 
     hours를 주면 모든 국가의 게시 시각 필터를 now - hours로 맞춘다 (when:은 올림한 일수).
@@ -522,8 +616,12 @@ def search_all(now: datetime, days_by_region: dict[Region, int], hours: Optional
     """
     client = client or GoogleNewsClient()
     queries = build_queries(days_by_region)
+    if web:
+        queries += build_web_queries(max(1, math.ceil(hours / 24)) if hours is not None else None)
     if competitor_days is not None:
         queries += build_competitor_queries(competitor_days)
+    if client.human:
+        client.rng.shuffle(queries)   # 매일 같은 순서로 훑지 않는다 (결과 합치기는 순서와 무관 — dedupe_run이 합친다)
     result = SearchResult(total=len(queries))
     health_zero: list[str] = []
     stale_queries: list[str] = []
@@ -537,7 +635,7 @@ def search_all(now: datetime, days_by_region: dict[Region, int], hours: Optional
             result.stats[-1] = stat.as_dict()
             continue
         try:
-            resp = client.request("GET", query.url)
+            resp = client.request("GET", query.url, edition=query.edition)
             if resp.status_code != 200:
                 raise RuntimeError(f"HTTP {resp.status_code}")
             items = parse_feed(resp.content, query, window_start, now, stat)
@@ -552,6 +650,9 @@ def search_all(now: datetime, days_by_region: dict[Region, int], hours: Optional
         else:
             if query.kind == "health" and stat.raw == 0:
                 health_zero.append(query.region.value)
+            if query.open and stat.raw >= 100:
+                # 관련도순 100건 한도 — 일부 기사가 밀려났을 수 있다 (쿼리를 나누거나 기간을 줄일 때)
+                logger.warning(f"매체 무관 검색 결과가 100건 한도에 닿음: {query.q}")
             if stat.raw >= _STALE_CANARY_MIN_ITEMS and stat.stale * 2 > stat.raw:
                 stale_queries.append(f"{query.region.value}/{query.kind}")
                 logger.error(f"when: 무시 의심 ({stat.stale}/{stat.raw}건이 기간 밖) — q 길이 확인: {query.q}")
@@ -635,6 +736,9 @@ def resolve_urls(items: list[NewsItem], cache: dict[str, str], client: Optional[
             outlet = OUTLETS.get(item.outlet_key)
             if outlet is not None and host not in outlet.keep_hosts:
                 logger.info(f"원문 호스트가 언론사 목록 밖 ({host}) — 제외: {item.title}")
+                continue
+            if outlet is not None and outlet.keep_paths and not (urlsplit(url).path or "/").startswith(outlet.keep_paths):
+                logger.info(f"원문 경로가 {outlet.name} 밖 — 제외: {url}")   # bizjournals.com의 다른 도시판
                 continue
             if is_non_article_path(url) and not (is_comp and "/press-release" in url):
                 logger.info(f"기사 아닌 경로 — 제외: {url}")

@@ -25,16 +25,24 @@ class FakeClient:
 class FakeNotifier:
     """ok=False면 본문 실패, fail_indices의 스레드 답글은 실패"""
 
-    def __init__(self, ok=True, fail_indices=()):
+    def __init__(self, ok=True, fail_indices=(), upload_ok=True):
         self.ok = ok
         self.fail_indices = set(fail_indices)
         self.sent = []
+        self.uploads = []
+        self.upload_ok = upload_ok
+        self.last_ts = None
 
     def send(self, messages):
         self.sent.append(messages)
         if not self.ok:
             return []
+        self.last_ts = "111.222"
         return [i for i in range(len(messages)) if i not in self.fail_indices]
+
+    def upload_file(self, content, filename, title, thread_ts=None, comment=""):
+        self.uploads.append({"content": content, "filename": filename, "thread_ts": thread_ts})
+        return self.upload_ok
 
 
 @pytest.fixture
@@ -44,7 +52,7 @@ def pipeline(monkeypatch, tmp_path):
     calls = {"triage": [], "summarize": 0}
     search_complete = {"value": True}
 
-    def fake_search(now, days_by_region, hours=None, client=None, competitor_days=None):
+    def fake_search(now, days_by_region, hours=None, client=None, competitor_days=None, web=False):
         calls["competitor_days"] = competitor_days
         result = SearchResult(items=[i.model_copy(deep=True) for i in found], total=22)
         if not search_complete["value"]:
@@ -210,7 +218,8 @@ def test_infra_section_can_be_disabled(pipeline, monkeypatch):
 
 def test_hours_option_sets_days_for_all_regions(pipeline):
     result = run(pipeline, dry_run=True, hours=30)
-    assert result["days_by_region"] == {"KR": 2, "US": 2, "SG": 2, "GLOBAL": 2}
+    assert set(result["days_by_region"].values()) == {2}
+    assert set(result["days_by_region"]) == {r.value for r in Region}
 
 
 def test_no_llm_uses_keyword_rules(pipeline):
@@ -503,7 +512,7 @@ def test_competitor_cap_counts_stories_and_extra_copies_are_not_decoded(pipeline
     titles = [i["title"] for i in result["competitors"]]
     assert len(titles) == 11                                  # 소식 2개 = 수주 사본 10 + 실적 1 (자사주는 다음 실행)
     assert "와이즈넛 자사주" not in titles
-    assert len([g for g in decoded if g.startswith("CBMi")]) == 1 + 5 + 1   # 수주 대표+5, 실적 1
+    assert sorted(decoded) == ["CBMi0001", "CBMi0011"]          # 묶음 대표만 복원 (수주·실적), 사본은 Google 링크
     state = pipeline.state()
     assert all(state.was_sent([make_item(n, title=f"와이즈넛 쇼핑엔티 수주 {n}", outlet_key=f"web:o{n}").title_key])
                for n in range(1, 11))                         # 복원 안 한 사본도 '보냄'으로 기록
@@ -524,3 +533,129 @@ def test_body_checks_prefer_korean_candidates(monkeypatch):
     kr = [comp_item(i, f"단신 {i}", hits=("doaz",), hour=1) for i in range(4, 6)]
     m.check_competitor_mentions(glob + kr, {}, None, FakeFetcher({}), 3)
     assert checked == ["CBMi0004", "CBMi0005", "CBMi0001"]     # 국내 2건 먼저, 남은 1자리는 최신 해외
+
+
+
+# --- HTML 정리본 ---
+
+def test_html_report_uploaded_in_thread_after_send(pipeline):
+    pipeline.found.append(make_item(1, title="관련 도면 AI <특집> & 분석"))
+    notifier = FakeNotifier()
+    result = run(pipeline, notifier)
+    assert result["html_uploaded"] is True
+    up = notifier.uploads[0]
+    assert up["thread_ts"] == "111.222" and up["filename"] == "aec-news-20261113.html"
+    page = up["content"].decode("utf-8")
+    assert "관련 도면 AI &lt;특집&gt; &amp; 분석" in page        # 제목 이스케이프
+    assert "<script" not in page                                # 외부·인라인 스크립트 없음
+
+
+def test_html_upload_failure_does_not_affect_history(pipeline):
+    pipeline.found.append(make_item(1, title="관련 도면 AI"))
+    result = run(pipeline, FakeNotifier(upload_ok=False))
+    assert result["notification"] is True and result["html_uploaded"] is False
+    assert pipeline.state().was_sent([make_item(1, title="관련 도면 AI").title_key])
+
+
+def test_no_upload_when_main_message_fails(pipeline):
+    pipeline.found.append(make_item(1, title="관련 도면 AI"))
+    notifier = FakeNotifier(ok=False)
+    run(pipeline, notifier)
+    assert notifier.uploads == []
+
+
+def test_html_can_be_disabled(pipeline, monkeypatch):
+    monkeypatch.setenv("AEC_NEWS_HTML", "0")
+    notifier = FakeNotifier()
+    result = run(pipeline, notifier)
+    assert notifier.uploads == [] and "html_uploaded" not in result
+    assert "HTML 정리본" not in m._preview_text([{"blocks": b} for b in [notifier.sent[0][0].blocks]])
+
+
+def test_web_section_capped_by_score_and_checked_last(pipeline, monkeypatch):
+    monkeypatch.setenv("AEC_NEWS_MAX_WEB", "2")
+    contexts = []
+
+    def summarize_spy(items, recent=None, repeats=None, same_competitor=False):
+        contexts.append(([i.region for i in items], [r["title"] for r in (recent or [])]))
+        for n, i in enumerate(items, 1):
+            i.story = n
+        return None
+
+    def triage_scored(items, threshold):
+        out = TriageOutcome()
+        for n, i in enumerate(items):
+            i.score, i.theme = 0.9 - n * 0.05, Theme.AEC_AI
+            out.main.append(i)
+        return out
+
+    monkeypatch.setattr(m, "summarize", summarize_spy)
+    monkeypatch.setattr(m, "triage", triage_scored)
+    major = make_item(1, title="관련 주요 언론 기사")
+    webs = [make_item(10 + n, title=f"관련 기타 매체 {n}", region=Region.WEB_KR, outlet_key=f"web:w{n}",
+                      outlet_name=f"매체{n}") for n in range(4)]
+    pipeline.found += [major, *webs]
+    result = run(pipeline)
+    web_titles = [i["title"] for i in result["main"] if i["region"] == "WEB_KR"]
+    assert sorted(web_titles) == ["관련 기타 매체 0", "관련 기타 매체 1"]  # 점수 상위 2개 소식
+    assert contexts[-1][0] == [Region.WEB_KR] * 4                       # 기타 매체는 마지막에 따로 요약
+    assert "관련 주요 언론 기사" in contexts[-1][1]                        # 앞 섹션 제목과 비교
+    assert not pipeline.state().was_sent([webs[3].title_key])           # 잘린 소식은 다음 실행에서
+
+
+def test_web_and_infra_items_are_not_decoded(pipeline, monkeypatch):
+    decoded = []
+
+    def resolve_spy(items, cache, client=None, competitor_mode=False):
+        decoded.extend(i.title for i in items)
+        return list(items), []
+
+    monkeypatch.setattr(m, "resolve_urls", resolve_spy)
+    pipeline.found += [make_item(1, title="관련 주요 언론"),
+                       make_item(2, title="관련 기타 매체", region=Region.WEB_KR, outlet_key="web:x", outlet_name="X"),
+                       make_item(3, title="인프라 데이터센터")]
+    result = run(pipeline)
+    assert decoded == ["관련 주요 언론"]
+    assert {i["title"] for i in result["main"]} == {"관련 주요 언론", "관련 기타 매체"}
+    assert [i["title"] for i in result["infra"]] == ["인프라 데이터센터"]
+
+
+def test_scheduled_post_time_and_wait(pipeline):
+    from src.aec_news.config import KST, get_config
+    cfg = get_config()
+    start = datetime(2026, 11, 13, 23, 0, tzinfo=timezone.utc)          # 11/14 08:00 KST
+    post = m.scheduled_post_time(start, cfg)
+    assert post == datetime(2026, 11, 14, 8, 30, tzinfo=KST)
+    late = datetime(2026, 11, 13, 23, 40, tzinfo=timezone.utc)          # 08:40 — 이미 지남 → 바로
+    assert m.scheduled_post_time(late, cfg) == datetime(2026, 11, 14, 8, 30, tzinfo=KST)
+
+    slept = []
+    future = datetime.now(timezone.utc) + timedelta(minutes=12)
+    notifier = FakeNotifier()
+    run(pipeline, notifier, post_at=future, sleep=slept.append)
+    assert len(slept) == 1 and 700 <= slept[0] <= 721                   # 게시 시각까지 기다린 뒤
+    assert len(notifier.sent) == 1                                      # 보낸다
+    slept.clear()
+    run(pipeline, FakeNotifier(), post_at=datetime.now(timezone.utc) - timedelta(minutes=5), sleep=slept.append)
+    assert slept == []                                                  # 늦으면 바로 보낸다
+
+
+def test_scheduler_starts_collection_lead_minutes_before_post(monkeypatch):
+    added = {}
+
+    class FakeScheduler:
+        def __init__(self, timezone):
+            pass
+
+        def add_job(self, func, trigger, **kw):
+            added["func"], added["trigger"] = func, trigger
+
+        def start(self):
+            added["started"] = True
+
+    import apscheduler.schedulers.blocking as blocking
+    monkeypatch.setattr(blocking, "BlockingScheduler", FakeScheduler)
+    m.main([])
+    assert added["func"] is m.execute_scheduled and added["started"]
+    fields = {f.name: str(f) for f in added["trigger"].fields}
+    assert fields["hour"] == "8" and fields["minute"] == "0"

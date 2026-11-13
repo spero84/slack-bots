@@ -15,6 +15,10 @@ class Region(str, Enum):
     US = "US"
     SG = "SG"
     GLOBAL = "GLOBAL"      # 미국·싱가포르 밖의 글로벌 언론사 (영국, 인도, 중동 등)
+    TRADE_KR = "TRADE_KR"          # 업계 전문지 국내 (전자신문, 대한경제 …)
+    TRADE_GLOBAL = "TRADE_GLOBAL"  # 업계 전문지 해외 (ENR, Construction Dive …)
+    WEB_KR = "WEB_KR"              # 매체 무관 검색으로 찾은 목록 밖 국내 매체
+    WEB_GLOBAL = "WEB_GLOBAL"      # 매체 무관 검색으로 찾은 목록 밖 해외 매체
 
 
 REGION_LABELS = {
@@ -22,7 +26,15 @@ REGION_LABELS = {
     Region.US: "🇺🇸 미국",
     Region.SG: "🇸🇬 싱가포르",
     Region.GLOBAL: "🌐 글로벌",
+    Region.TRADE_KR: "📰 전문지(국내)",
+    Region.TRADE_GLOBAL: "📰 전문지(해외)",
+    Region.WEB_KR: "🔎 기타 매체(국내)",
+    Region.WEB_GLOBAL: "🔎 기타 매체(해외)",
 }
+# 한글 제목만 받고 국내 검색 기간(2일)을 쓰는 섹션
+KOREAN_REGIONS = frozenset({Region.KR, Region.TRADE_KR, Region.WEB_KR})
+# 언론사 목록이 없는 섹션 (매체 무관 검색 결과)
+WEB_REGIONS = frozenset({Region.WEB_KR, Region.WEB_GLOBAL})
 
 
 class Theme(str, Enum):
@@ -32,6 +44,8 @@ class Theme(str, Enum):
     EPC_RAG = "epc_rag"
     AEC_RAG = "aec_rag"
     DRAWING_BIM = "drawing_bim"
+    DOC_AI = "doc_ai"        # 문서 AI·지능형 문서 처리 (산업 무관, 사용자 키워드 2026-11-13)
+    CONTECH = "contech"      # ConTech·스마트건설·건설 DX (AI가 아니어도, 사용자 키워드 2026-11-13)
 
 
 THEME_LABELS = {
@@ -39,7 +53,9 @@ THEME_LABELS = {
     Theme.AEC_AI: "AEC × AI",
     Theme.EPC_RAG: "EPC × RAG",
     Theme.AEC_RAG: "AEC × RAG",
-    Theme.DRAWING_BIM: "AI × 도면/BIM",
+    Theme.DRAWING_BIM: "AI × 도면/BIM·설계",
+    Theme.DOC_AI: "문서 AI",
+    Theme.CONTECH: "ConTech·스마트건설",
 }
 
 

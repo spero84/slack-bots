@@ -37,10 +37,17 @@ class Config:
     intl_lookback_days: int = field(default_factory=lambda: int(os.environ.get("AEC_NEWS_INTL_DAYS", "7")))
     max_lookback_days: int = 7
 
-    # 스케줄 (KST)
+    # 스케줄 (KST): AEC_NEWS_HOUR:MINUTE(08:30)에 Slack에 올린다. 사람 속도로 검색하면 25~30분 걸려
+    # AEC_NEWS_LEAD_MINUTES(30)분 먼저(08:00) 수집을 시작하고, 일찍 끝나면 08:30까지 기다렸다가 올린다
     schedule_hour: int = field(default_factory=lambda: int(os.environ.get("AEC_NEWS_HOUR", "8")))
     schedule_minute: int = field(default_factory=lambda: int(os.environ.get("AEC_NEWS_MINUTE", "30")))
+    lead_minutes: int = field(default_factory=lambda: int(os.environ.get("AEC_NEWS_LEAD_MINUTES", "30")))
     run_on_start: bool = field(default_factory=lambda: os.environ.get("AEC_NEWS_RUN_ON_START", "0") == "1")
+    # 매체 무관 검색 (사용자 요청 2026-11-13) — 목록 밖 매체 기사는 🔎 기타 매체 섹션에 섹션당 최대 N개 소식
+    web_search: bool = field(default_factory=lambda: os.environ.get("AEC_NEWS_WEB_SEARCH", "1") == "1")
+    max_web_stories: int = field(default_factory=lambda: int(os.environ.get("AEC_NEWS_MAX_WEB", "10")))
+    # 데일리 다이제스트 HTML 정리본을 Slack 스레드에 파일로 올린다 (사용자 요청 2026-11-13)
+    html_report: bool = field(default_factory=lambda: os.environ.get("AEC_NEWS_HTML", "1") == "1")
 
     # 경쟁사 검색 기간(일)과 실행당 최대 소식 수 — 같은 소식 묶음 단위 (넘치면 최신순으로 자르고 나머지는 다음 실행에서)
     competitor_lookback_days: int = field(default_factory=lambda: int(os.environ.get("AEC_NEWS_COMPETITOR_DAYS", "7")))
@@ -52,9 +59,12 @@ class Config:
         os.environ.get("AEC_NEWS_COMPETITOR_THRESHOLD", "0.5")
     ))
 
-    # Google News 요청 간격(초, 0~1초 지터 추가). 2026-11-12 실측: 2~3초 간격 수십 회는 문제없었고,
-    # 두 프로세스가 동시에 ~3초 간격으로 보낼 때 429(google.com/sorry)가 한 번 났다
-    request_interval: float = field(default_factory=lambda: float(os.environ.get("AEC_NEWS_REQUEST_INTERVAL", "3.0")))
+    # Google News를 사람이 브라우저로 보는 속도로 (사용자 요청 2026-11-13 "캡차에 걸리지 않도록 사람처럼, 타이밍도"):
+    # 요청 사이 무작위 4~9초, 12~20회마다 25~60초 휴식. 실행당 검색 ~130회 + 링크 열기로 25~30분 걸린다
+    gap_min: float = field(default_factory=lambda: float(os.environ.get("AEC_NEWS_GAP_MIN", "4")))
+    gap_max: float = field(default_factory=lambda: float(os.environ.get("AEC_NEWS_GAP_MAX", "9")))
+    break_every: tuple = (12, 20)
+    break_secs: tuple = (25.0, 60.0)
     max_decodes: int = field(default_factory=lambda: int(os.environ.get("AEC_NEWS_MAX_DECODES", "30")))
 
 
@@ -72,6 +82,9 @@ class Outlet:
     keep_hosts: tuple[str, ...]                   # 받아들이는 호스트 (정확히 일치). 나머지 하위 도메인은 버린다
     host_names: tuple[tuple[str, str], ...] = ()  # 계열 매체 표시 이름 (it.chosun.com → IT조선)
     edition: str = ""                             # Google News 지역판 (EDITIONS 키). 비우면 섹션 기본값
+    aec_focused: bool = False                     # 건설 전문 매체 — 'AI'만으로 검색 (모든 기사가 건설 맥락)
+    watch: bool = False                           # 매일 확인 사이트 (사용자 지정) — 사용자 키워드 묶음(WATCH_TERMS)으로 검색
+    keep_paths: tuple[str, ...] = ()              # 원문 URL 경로가 이것으로 시작해야 한다 (bizjournals.com/sanjose/ 등)
 
     def name_for(self, host: str) -> str:
         return dict(self.host_names).get((host or "").lower(), self.name)
@@ -102,8 +115,8 @@ _OUTLET_LIST: list[Outlet] = [
     Outlet("yna", "연합뉴스", Region.KR, "yna.co.kr", ("www.yna.co.kr",)),
     Outlet("hankyung", "한국경제", Region.KR, "hankyung.com",
            ("www.hankyung.com", "magazine.hankyung.com", "plus.hankyung.com"),
-           (("magazine.hankyung.com", "한경매거진"),)),
-    Outlet("mk", "매일경제", Region.KR, "mk.co.kr", ("www.mk.co.kr", "m.mk.co.kr", "re.mk.co.kr")),
+           (("magazine.hankyung.com", "한경매거진"),), watch=True),
+    Outlet("mk", "매일경제", Region.KR, "mk.co.kr", ("www.mk.co.kr", "m.mk.co.kr", "re.mk.co.kr"), watch=True),
     Outlet("sedaily", "서울경제", Region.KR, "sedaily.com", ("www.sedaily.com", "m.sedaily.com")),
     Outlet("mt", "머니투데이", Region.KR, "mt.co.kr", ("www.mt.co.kr", "news.mt.co.kr")),
     # --- 해외 30곳: Press Gazette 'Top 50 English-language news sites in the world' (Similarweb 2026년 10월 방문 수,
@@ -117,7 +130,7 @@ _OUTLET_LIST: list[Outlet] = [
     Outlet("foxnews", "Fox News", Region.US, "foxnews.com", ("www.foxnews.com",)),                        # 8
     Outlet("cnbc", "CNBC", Region.US, "cnbc.com", ("www.cnbc.com",)),                                     # 15
     Outlet("nypost", "New York Post", Region.US, "nypost.com", ("nypost.com",)),                          # 16
-    Outlet("reuters", "Reuters", Region.US, "reuters.com", ("www.reuters.com",)),                         # 17
+    Outlet("reuters", "Reuters", Region.US, "reuters.com", ("www.reuters.com",), watch=True),                         # 17
     Outlet("apnews", "AP News", Region.US, "apnews.com", ("apnews.com", "www.apnews.com")),               # 18
     Outlet("usatoday", "USA Today", Region.US, "usatoday.com", ("www.usatoday.com",)),                    # 19
     Outlet("wsj", "The Wall Street Journal", Region.US, "wsj.com", ("www.wsj.com",)),                     # 20
@@ -152,6 +165,45 @@ _OUTLET_LIST: list[Outlet] = [
     Outlet("abcau", "ABC News (Australia)", Region.GLOBAL, "abc.net.au", ("www.abc.net.au",)),          # 31
     # Al Jazeera는 en-GB·en-US 결과가 같아(12/12) en-US 묶음에 넣는다 (en-GB 묶음은 BBC·Guardian·Daily Mail로 이미 참)
     Outlet("aljazeera", "Al Jazeera", Region.GLOBAL, "aljazeera.com", ("www.aljazeera.com",)),          # 25
+    # --- 📰 전문지 = 매일 확인 사이트 (사용자 지정 sources_us / sources_kr, 2026-11-13) + Engineering.com.
+    # 한국경제·매일경제·Reuters도 매일 확인 사이트지만 주요 언론사 섹션에 남긴다 (watch=True로 사용자 키워드 검색).
+    # ENR West(enr.com/topics/1055-west-construction-news)는 enr.com 기사라 ENR 검색에 포함된다.
+    # (아래 업계 전문지 설명은 첫 추가 때 기록)
+    # --- 📰 업계 전문지 (2026-11-13 사용자 요청). IT·종합 산업지(전자신문 'AI' 제목 기사 2일 100건, ZDNet 91, 대한경제 25,
+    # engineering.com 7일 14)는 일반 주제 검색어(AI + 건설 용어)로, 건설 전문지(한국건설신문, ENR, Construction Dive,
+    # AEC Magazine, BD+C)는 'AI'만으로 찾는다 (aec_focused — 제목에 '건설'이 없어도 건설 기사다)
+    Outlet("dnews", "대한경제", Region.TRADE_KR, "dnews.co.kr", ("www.dnews.co.kr", "m.dnews.co.kr"), watch=True),
+    Outlet("etnews", "전자신문", Region.TRADE_KR, "etnews.com", ("www.etnews.com", "m.etnews.com"), watch=True),
+    Outlet("zdnet", "지디넷코리아", Region.TRADE_KR, "zdnet.co.kr", ("zdnet.co.kr", "www.zdnet.co.kr"), watch=True),
+    Outlet("ikld", "국토일보", Region.TRADE_KR, "ikld.kr", ("www.ikld.kr", "m.ikld.kr", "ikld.kr"), aec_focused=True,
+           watch=True),
+    Outlet("conslove", "한국건설신문", Region.TRADE_KR, "conslove.co.kr", ("www.conslove.co.kr",), aec_focused=True,
+           watch=True),
+    Outlet("bloter", "블로터", Region.TRADE_KR, "bloter.net", ("www.bloter.net", "bloter.net"), watch=True),
+    Outlet("enr", "ENR", Region.TRADE_GLOBAL, "enr.com", ("www.enr.com",), aec_focused=True, watch=True),
+    Outlet("constructiondive", "Construction Dive", Region.TRADE_GLOBAL, "constructiondive.com",
+           ("www.constructiondive.com",), aec_focused=True, watch=True),
+    Outlet("bdcnetwork", "Building Design+Construction", Region.TRADE_GLOBAL, "bdcnetwork.com",
+           ("www.bdcnetwork.com",), aec_focused=True, watch=True),
+    Outlet("constructionexec", "Construction Executive", Region.TRADE_GLOBAL, "constructionexec.com",
+           ("constructionexec.com", "www.constructionexec.com"), aec_focused=True, watch=True),
+    Outlet("aecmag", "AEC Magazine", Region.TRADE_GLOBAL, "aecmag.com", ("aecmag.com", "www.aecmag.com"),
+           aec_focused=True, watch=True),
+    Outlet("archrecord", "Architectural Record", Region.TRADE_GLOBAL, "architecturalrecord.com",
+           ("www.architecturalrecord.com",), aec_focused=True, watch=True),
+    Outlet("builtworlds", "BuiltWorlds", Region.TRADE_GLOBAL, "builtworlds.com", ("builtworlds.com", "www.builtworlds.com"),
+           aec_focused=True, watch=True),
+    Outlet("techcrunch", "TechCrunch", Region.TRADE_GLOBAL, "techcrunch.com", ("techcrunch.com",), watch=True),
+    Outlet("venturebeat", "VentureBeat", Region.TRADE_GLOBAL, "venturebeat.com", ("venturebeat.com",), watch=True),
+    Outlet("techreview", "MIT Technology Review", Region.TRADE_GLOBAL, "technologyreview.com",
+           ("www.technologyreview.com",), watch=True),
+    Outlet("theinformation", "The Information", Region.TRADE_GLOBAL, "theinformation.com", ("www.theinformation.com",),
+           watch=True),
+    # bizjournals.com은 도시별 Business Journal이 한 도메인 — 검색은 site:bizjournals.com/sanjose (경로 지정이 된다,
+    # 2026-11-13 실측 7일 56건), 원문 경로 /sanjose/도 다시 확인 (매체 무관 검색에 다른 도시판이 섞일 때)
+    Outlet("svbj", "Silicon Valley Business Journal", Region.TRADE_GLOBAL, "bizjournals.com/sanjose",
+           ("www.bizjournals.com",), watch=True, keep_paths=("/sanjose/",)),
+    Outlet("engineeringcom", "Engineering.com", Region.TRADE_GLOBAL, "engineering.com", ("www.engineering.com",)),
 ]
 
 OUTLETS: dict[str, Outlet] = {o.key: o for o in _OUTLET_LIST}
@@ -178,7 +230,8 @@ EDITIONS = {
     "en-GB": Edition(hl="en-GB", gl="GB", ceid="GB:en"),
     "en-IN": Edition(hl="en-IN", gl="IN", ceid="IN:en"),
 }
-DEFAULT_EDITION = {Region.KR: "ko", Region.US: "en-US", Region.SG: "en-SG", Region.GLOBAL: "en-US"}
+DEFAULT_EDITION = {Region.KR: "ko", Region.US: "en-US", Region.SG: "en-SG", Region.GLOBAL: "en-US",
+                   Region.TRADE_KR: "ko", Region.TRADE_GLOBAL: "en-US", Region.WEB_KR: "ko", Region.WEB_GLOBAL: "en-US"}
 
 # 검색어 (주제 묶음 × 국가). 실제 쿼리는 `{검색어} (site:a OR site:b ...) when:Nd`
 # - intitle:을 붙인다. 없으면 사이드바·관련 기사 텍스트까지 매칭돼 결과가 거의 전부 노이즈다
@@ -207,7 +260,90 @@ SEARCH_TERMS: dict[str, dict[Region, str]] = {
         Region.GLOBAL: _EN_RAG,
     },
 }
-SEARCH_KIND_THEME = {"drawing": Theme.DRAWING_BIM, "aec_ai": Theme.AEC_AI, "rag": Theme.AEC_RAG}
+for _kind, _terms in SEARCH_TERMS.items():
+    _terms[Region.TRADE_KR] = _terms[Region.KR]
+    _terms[Region.TRADE_GLOBAL] = _terms[Region.US]
+# 건설 전문지(aec_focused)는 'aec_ai' 대신 'ai'(AI 용어만)로 찾는다
+SEARCH_TERMS["ai"] = {
+    Region.TRADE_KR: "(intitle:AI OR intitle:인공지능 OR intitle:LLM OR intitle:RAG)",
+    Region.TRADE_GLOBAL: '(intitle:AI OR intitle:"artificial intelligence" OR intitle:LLM OR intitle:RAG OR intitle:agentic)',
+}
+SEARCH_KIND_THEME = {"drawing": Theme.DRAWING_BIM, "aec_ai": Theme.AEC_AI, "ai": Theme.AEC_AI, "rag": Theme.AEC_RAG}
+
+
+# --- 매일 확인 사이트용 사용자 키워드 (keywords_en / keywords_kr, 2026-11-13) ---
+# 사용자 키워드 19개를 묶어 intitle: 검색어 5종으로 만든다 (사이트×키워드마다 쿼리를 만들면 하루 수백 회가 된다).
+# - w_focus: 건설 전문지(aec_focused) — 모든 기사가 건설 맥락이라 AI·자동화·BIM·ConTech 용어만
+# - 그 밖(IT·종합지): w_aec(EPC/AECO/건설 × AI, 건설 AI 에이전트), w_design(BIM·설계 자동화·도면 검토),
+#   w_doc(건설 문서 AI·문서 AI·IDP), w_contech(ConTech·스마트건설·건설 AX/DX·건설 데이터)
+WATCH_TERMS: dict[str, dict[str, str]] = {
+    # 영문 검색어는 짧게: 'AI agent'·'agentic AI' 제목은 이미 'AI'를 포함한다. 길면 사이트가 쿼리마다 하나씩만 들어가
+    # 하루 쿼리 수가 30회 넘게 늘었다 (190자 제한)
+    "w_focus": {
+        "ko": "(intitle:AI OR intitle:인공지능 OR intitle:BIM OR intitle:스마트건설 OR intitle:AX OR intitle:DX OR intitle:자동화)",
+        "en": "(intitle:AI OR intitle:automation OR intitle:BIM OR intitle:ConTech OR intitle:software)",
+    },
+    "w_aec": {
+        "ko": "(intitle:AI OR intitle:인공지능 OR intitle:에이전트) (intitle:건설 OR intitle:건설업 OR intitle:시공 OR intitle:EPC)",
+        "en": "intitle:AI (intitle:construction OR intitle:AECO OR intitle:AEC OR intitle:EPC OR intitle:contractors)",
+    },
+    "w_design": {
+        "ko": '(intitle:BIM OR intitle:"설계 자동화" OR intitle:"AI 설계" OR intitle:"설계 검토" OR intitle:도면)',
+        "en": '(intitle:BIM OR intitle:Revit OR intitle:"design automation" OR intitle:"drawing review")',
+    },
+    "w_doc": {
+        "ko": '(intitle:"문서 AI" OR intitle:"AI 문서" OR intitle:"지능형 문서" OR intitle:시방서 OR intitle:"계약서 AI" OR '
+              'intitle:IDP OR intitle:"건설 문서")',
+        "en": '(intitle:"document AI" OR intitle:"document intelligence" OR intitle:IDP OR intitle:"document processing")',
+    },
+    "w_contech": {
+        "ko": '(intitle:스마트건설 OR intitle:"스마트 건설" OR intitle:"건설 AX" OR intitle:"건설 DX" OR intitle:건설AX OR '
+              'intitle:"건설 디지털" OR intitle:"건설 데이터" OR intitle:"프로젝트 정보")',
+        "en": '(intitle:ConTech OR intitle:"construction tech" OR intitle:"construction software")',
+    },
+}
+# 영문 유사어 보조 묶음 (사용자 키워드표의 '검색 보완어' 중 위 묶음에 못 넣은 것). 국내는 위 묶음에 모두 들어갔다
+WATCH_TERMS_EN_EXTRA: dict[str, str] = {
+    "w_focus2": '(intitle:"artificial intelligence" OR intitle:Revit OR intitle:drawings OR intitle:"design review" '
+                'OR intitle:document)',
+    "w_aec2": 'intitle:"artificial intelligence" (intitle:construction OR intitle:AECO OR intitle:AEC OR intitle:EPC)',
+    "w_design2": '(intitle:"design review" OR intitle:"design validation" OR intitle:"drawing comparison" OR '
+                 'intitle:"revision detection")',
+    "w_doc2": '(intitle:"document understanding" OR intitle:"enterprise document")',
+    "w_contech2": '(intitle:"construction automation" OR intitle:"construction agent" OR intitle:"construction agents")',
+}
+for _kind, _terms in WATCH_TERMS_EN_EXTRA.items():
+    WATCH_TERMS[_kind] = {"en": _terms}
+WATCH_KIND_THEME = {"w_focus": Theme.AEC_AI, "w_aec": Theme.AEC_AI, "w_design": Theme.DRAWING_BIM,
+                    "w_doc": Theme.DOC_AI, "w_contech": Theme.CONTECH,
+                    "w_focus2": Theme.AEC_AI, "w_aec2": Theme.AEC_AI, "w_design2": Theme.DRAWING_BIM,
+                    "w_doc2": Theme.DOC_AI, "w_contech2": Theme.CONTECH}
+for _kind, _by_lang in WATCH_TERMS.items():
+    SEARCH_TERMS[_kind] = {}
+    for _r in (Region.KR, Region.US, Region.SG, Region.GLOBAL, Region.TRADE_KR, Region.TRADE_GLOBAL):
+        _lang = "ko" if _r in (Region.KR, Region.TRADE_KR) else "en"
+        if _lang in _by_lang:
+            SEARCH_TERMS[_kind][_r] = _by_lang[_lang]
+SEARCH_KIND_THEME.update(WATCH_KIND_THEME)
+
+
+def outlet_takes_kind(outlet: "Outlet", kind: str) -> bool:
+    """언론사가 이 검색어 묶음으로 검색되는지
+
+    - 매일 확인 사이트(watch): 사용자 키워드 묶음만 (건설 전문지는 w_focus, 그 밖은 w_aec·w_design·w_doc·w_contech) + rag
+    - 그 밖: 기존 주제 검색어 (건설 전문지는 'ai', 그 밖은 'aec_ai') + drawing·rag
+    """
+    if kind.startswith("w_"):
+        if not outlet.watch:
+            return False
+        return kind.startswith("w_focus") == outlet.aec_focused
+    if outlet.watch:
+        return kind == "rag"
+    if kind == "ai":
+        return outlet.aec_focused
+    if kind == "aec_ai":
+        return not outlet.aec_focused
+    return True
 
 # 점검 쿼리: 결과가 0건이면 Google News 응답 이상으로 보고 경고한다 (주제 쿼리는 실제로 0건인 날이 많아
 # 0건 경고를 하지 않는다). 한 쿼리의 언론사는 지역판이 같아야 해서 글로벌은 en-GB·en-IN을 따로 본다.
@@ -217,6 +353,7 @@ HEALTH_QUERIES: tuple[tuple[Region, str, tuple[str, ...]], ...] = (
     (Region.SG, "intitle:AI", ("straitstimes", "cna")),
     (Region.GLOBAL, "intitle:AI", ("bbc", "guardian")),
     (Region.GLOBAL, "intitle:AI", ("ndtv", "hindustantimes")),
+    (Region.TRADE_KR, "intitle:AI", ("etnews", "zdnet")),   # 하루 'AI' 제목 기사 수십 건 (건설 전문지는 0건인 날이 있어 제외)
 )
 
 # Google News는 q가 200자를 넘으면 뒤를 조용히 잘라 when:이 빠진다 (2026-11-12 실측: 200자 정상, 201자부터 무시).
@@ -392,10 +529,42 @@ COMPETITOR_QUERIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
      'OR "general contractors" OR "Luigi La Corte")', "en-US", ("provision",)),
 )
 
-# 경쟁사 검색 결과에서 버릴 출처 (블로그·재게시·자동 생성 페이지·스팸). 호스트가 이것이거나 이것으로 끝나면 제외
+# --- 매체 무관 검색 (언론사 site: 제한 없음) ---
+# 2026-11-13 실측: 같은 intitle: 검색어로 국내 2일 45·21·55·3건, 영문 34·11·12건 — 100건 한도에 한참 못 미치고 오래된
+# 기사도 없었다. 국내 결과 45건 중 목록 언론사는 3건뿐이고 건축사신문·매일건설신문·FA저널·캐드앤그래픽스(국내),
+# For Construction Pros·CoStar·IT Brief(해외) 같은 전문 매체 기사가 대부분이다. 목록 언론사 기사는 그 섹션으로 가고,
+# 나머지는 🔎 기타 매체 섹션으로 간다. (검색어, 지역판, 일수, 주제 묶음)
+WEB_QUERIES: tuple[tuple[str, str, int, str], ...] = (
+    ('(intitle:도면 OR intitle:BIM OR intitle:디지털트윈 OR intitle:CAD OR intitle:"설계 자동화")', "ko", 2, "drawing"),
+    ("intitle:AI intitle:건설", "ko", 2, "aec_ai"),
+    ("intitle:AI (intitle:건축 OR intitle:플랜트 OR intitle:EPC OR intitle:엔지니어링 OR intitle:스마트건설)", "ko", 2, "aec_ai"),
+    ("RAG (건설 OR 플랜트 OR 엔지니어링 OR 도면 OR BIM)", "ko", 2, "rag"),
+    ("intitle:AI (intitle:construction OR intitle:contractors OR intitle:architects OR intitle:AEC OR intitle:EPC)",
+     "en-US", 2, "aec_ai"),
+    # 영문 도면 묶음은 AI를 요구한다 (없으면 실험실·5G 'digital twin' 기사가 섞인다)
+    ('(intitle:BIM OR intitle:Revit OR intitle:"construction drawings" OR intitle:"engineering drawings" OR '
+     'intitle:"design automation" OR intitle:"drawing review") AI', "en-US", 7, "drawing"),
+    ('"retrieval-augmented" (construction OR engineering OR BIM OR EPC)', "en-US", 7, "rag"),
+    # 사용자 키워드표(keywords_kr/keywords_en, 2026-11-13)의 키워드·유사 키워드를 모두 매체 무관 검색에도 쓴다
+    (WATCH_TERMS["w_aec"]["ko"], "ko", 2, "w_aec"),
+    (WATCH_TERMS["w_design"]["ko"], "ko", 2, "w_design"),
+    (WATCH_TERMS["w_doc"]["ko"], "ko", 2, "w_doc"),
+    (WATCH_TERMS["w_contech"]["ko"], "ko", 2, "w_contech"),
+    (WATCH_TERMS["w_aec2"]["en"], "en-US", 7, "w_aec2"),
+    (WATCH_TERMS["w_design"]["en"], "en-US", 7, "w_design"),
+    (WATCH_TERMS["w_design2"]["en"], "en-US", 7, "w_design2"),
+    (WATCH_TERMS["w_doc"]["en"], "en-US", 2, "w_doc"),
+    (WATCH_TERMS["w_doc2"]["en"], "en-US", 7, "w_doc2"),
+    (WATCH_TERMS["w_contech"]["en"], "en-US", 7, "w_contech"),
+    (WATCH_TERMS["w_contech2"]["en"], "en-US", 7, "w_contech2"),
+)
+
+# 경쟁사·매체 무관 검색 결과에서 버릴 출처 (블로그·재게시·자동 생성 페이지·스팸). 호스트가 이것이거나 이것으로 끝나면 제외
 COMPETITOR_BLOCK_HOSTS = (
     "brunch.co.kr", "blog.naver.com", "m.blog.naver.com", "tistory.com", "v.daum.net",
     "calgaryroughnecks.com", "dealroom.co", "getlatka.com", "maxpreps.com", "cloudwards.net", "g2.com",
     # 자동 생성 주식 투자분석·실적 요약 (와이즈넛·Trimble 결과의 잡음)
     "judal.co.kr", "tradingview.com", "stockstory.org",
+    # 기계번역·자동 수집 사이트 (매체 무관 검색 결과의 잡음)
+    "vietnam.vn", "biggo.com", "biggo.co.kr", "news.lavx.hu",
 )

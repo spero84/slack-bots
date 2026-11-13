@@ -8,6 +8,7 @@
 
 Slack 메시지는 블록 50개 제한이 있어 넘치면 나머지를 스레드 답글로 보낸다.
 """
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,7 +18,7 @@ import requests
 
 from .config import COMPETITOR_GROUPS, COMPETITORS, KST, OUTLETS, get_config
 from .logger import logger
-from .models import REGION_LABELS, THEME_LABELS, NewsItem, Region
+from .models import KOREAN_REGIONS, REGION_LABELS, THEME_LABELS, WEB_REGIONS, NewsItem, Region
 
 MAX_BLOCKS = 48           # Slack 한도 50에서 여유
 MAX_SECTION_CHARS = 2900  # section text 한도 3000
@@ -34,14 +35,19 @@ class DigestContext:
     candidates: int = 0                 # AI 판정에 넘긴 후보 수
     warnings: list[str] = field(default_factory=list)
     repeats_skipped: int = 0            # 이미 보낸 소식의 다른 매체 기사라 뺀 수
+    html_attached: bool = False         # HTML 정리본을 스레드에 올리는지 (머리말에 안내)
 
     def period_text(self) -> str:
         if self.hours is not None:
             return f"최근 {self.hours:g}시간"
-        groups: dict[int, list[str]] = {}
-        for region, days in self.days_by_region.items():
-            groups.setdefault(days, []).append(REGION_LABELS[region].split()[1])
-        return " · ".join(f"{'/'.join(names)} 최근 {days}일" for days, names in groups.items())
+        kr = [d for r, d in self.days_by_region.items() if r in KOREAN_REGIONS and r not in WEB_REGIONS]
+        intl = [d for r, d in self.days_by_region.items() if r not in KOREAN_REGIONS and r not in WEB_REGIONS]
+        parts = []
+        if kr:
+            parts.append(f"국내 최근 {max(kr)}일")
+        if intl:
+            parts.append(f"해외 최근 {max(intl)}일")
+        return " · ".join(parts)
 
 
 @dataclass
@@ -251,9 +257,10 @@ def build_messages(
         {"type": "header", "text": {"type": "plain_text", "text": title, "emoji": True}},
         _section(summary),
         {"type": "context", "elements": [{"type": "mrkdwn", "text": (
-            f"검색 기간 {ctx.period_text()} · 언론사 {outlet_scope_text()}"
+            f"검색 기간 {ctx.period_text()} · 언론사 {outlet_scope_text()} + 매체 무관 검색"
             + (f" · 경쟁사 {len(COMPETITORS)}곳" if COMPETITORS else "")
-            + " · 키워드 EPC·AEC × AI/RAG, AI × 도면·BIM"
+            + " · 키워드 EPC·AECO × AI/RAG, BIM·설계·도면 AI, 문서 AI, ConTech·스마트건설"
+            + (" · 📄 HTML 정리본은 스레드에 있습니다" if ctx.html_attached else "")
         )}]},
     ]
 
@@ -298,6 +305,7 @@ class SlackNotifier:
         self.bot_token = bot_token or config.slack_bot_token
         self.channel_id = channel_id or config.slack_channel_id
         self._sleep = sleep
+        self.last_ts: Optional[str] = None    # 마지막으로 보낸 본문 메시지 ts (HTML 파일을 그 스레드에 올린다)
 
     def _post(self, blocks: list[dict], text: str, thread_ts: Optional[str] = None) -> dict:
         """429(Retry-After)·5xx·네트워크 오류는 최대 3번까지 시도. 마지막 오류는 예외 또는 ok=false로 돌려준다."""
@@ -355,6 +363,7 @@ class SlackNotifier:
             return []
         delivered = [0]
         thread_ts = result.get("ts")
+        self.last_ts = thread_ts
         for idx, message in enumerate(messages[1:], 1):
             try:
                 reply = self._post(message.blocks, message.text, thread_ts=thread_ts)
@@ -367,3 +376,37 @@ class SlackNotifier:
                 logger.error(f"Slack 스레드 전송 오류 (메시지 {idx}): {reply.get('error')} — 다음 실행에서 다시 보낸다")
         logger.info(f"Slack 전송 완료 (메시지 {len(delivered)}/{len(messages)}개)")
         return delivered
+
+    def _api(self, method: str, **data) -> dict:
+        response = requests.post(f"https://slack.com/api/{method}",
+                                 headers={"Authorization": f"Bearer {self.bot_token}"}, data=data, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
+    def upload_file(self, content: bytes, filename: str, title: str, thread_ts: Optional[str] = None,
+                    comment: str = "") -> bool:
+        """파일 업로드 (files.getUploadURLExternal → 업로드 → files.completeUploadExternal, files:write 권한).
+        실패는 경고만 남기고 False — 본문 메시지와 전송 이력에는 영향이 없다."""
+        if not self.bot_token or not self.channel_id:
+            return False
+        try:
+            step1 = self._api("files.getUploadURLExternal", filename=filename, length=str(len(content)))
+            if not step1.get("ok"):
+                logger.warning(f"HTML 업로드 URL 발급 실패: {step1.get('error')}")
+                return False
+            up = requests.post(step1["upload_url"], files={"file": (filename, content, "text/html")}, timeout=60)
+            if up.status_code != 200:
+                logger.warning(f"HTML 파일 업로드 실패: HTTP {up.status_code}")
+                return False
+            files = json.dumps([{"id": step1["file_id"], "title": title}], ensure_ascii=False)
+            extra = {"thread_ts": thread_ts} if thread_ts else {}
+            step3 = self._api("files.completeUploadExternal", files=files, channel_id=self.channel_id,
+                              initial_comment=comment, **extra)
+            if not step3.get("ok"):
+                logger.warning(f"HTML 업로드 완료 처리 실패: {step3.get('error')}")
+                return False
+        except (requests.RequestException, KeyError, ValueError) as e:
+            logger.warning(f"HTML 업로드 오류: {e}")
+            return False
+        logger.info(f"HTML 정리본 업로드 완료: {filename}")
+        return True

@@ -21,14 +21,16 @@ import logging
 import math
 import sys
 import threading
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .article_text import ArticleFetcher, mention_excerpt
 from .config import COMPETITORS, KST, get_config
 from .google_news import GoogleNewsClient, lookback_days, names_pattern, resolve_urls, search_all
+from .html_report import build_html
 from .logger import logger
-from .models import NewsItem, Region, canonical_url
+from .models import KOREAN_REGIONS, WEB_REGIONS, NewsItem, Region, canonical_url
 from .relevance import (
     CompetitorOutcome,
     TriageOutcome,
@@ -39,7 +41,6 @@ from .relevance import (
     verify_competitors,
 )
 from .slack_notifier import (
-    MAX_SAME_STORY_LINKS,
     DigestContext,
     SlackNotifier,
     build_messages,
@@ -125,7 +126,7 @@ def check_competitor_mentions(items: list[NewsItem], cache: dict[str, str], clie
         else:
             body.append(item)
     # 국내 후보 먼저 (실측: 국내 사명은 본문 언급이 실제 소식인 경우가 많고, 해외는 사이드바 매칭이 대부분), 그 안에서 최신순
-    body.sort(key=lambda a: (a.region != Region.KR, -a.published_at.timestamp()))
+    body.sort(key=lambda a: (a.region not in KOREAN_REGIONS, -a.published_at.timestamp()))
     checking, pending = body[:max_body_checks], body[max_body_checks:]
     no_mention: list[NewsItem] = []
     if checking:
@@ -176,11 +177,13 @@ def drop_repeated_stories(items: list[NewsItem], flagged: list[NewsItem]) -> lis
 def run_workflow(dry_run: bool = False, hours: Optional[float] = None, use_llm: bool = True,
                  now: Optional[datetime] = None, state: Optional[RunState] = None,
                  client: Optional[GoogleNewsClient] = None, notifier: Optional[SlackNotifier] = None,
-                 fetcher: Optional[ArticleFetcher] = None) -> dict:
+                 fetcher: Optional[ArticleFetcher] = None, post_at: Optional[datetime] = None,
+                 sleep=time.sleep) -> dict:
+    """post_at: 이 시각 전에 끝나면 그때까지 기다렸다가 Slack에 올린다 (스케줄 실행 — 08:00 수집 시작, 08:30 게시)"""
     config = get_config()
     now = now or datetime.now(timezone.utc)
     state = state or RunState().load()
-    client = client or GoogleNewsClient()
+    client = client or GoogleNewsClient(cookie_path=str(state.path.parent / "google_cookies.txt"))
     if hours is not None:
         days = max(1, min(config.max_lookback_days, math.ceil(hours / 24)))
         days_by_region = {r: days for r in Region}
@@ -206,7 +209,8 @@ def run_workflow(dry_run: bool = False, hours: Optional[float] = None, use_llm: 
     if config.include_competitors and COMPETITORS:
         competitor_days = (max(1, min(config.max_lookback_days, math.ceil(hours / 24))) if hours is not None
                            else config.competitor_lookback_days)
-    search = search_all(now, days_by_region, hours=hours, client=client, competitor_days=competitor_days)
+    search = search_all(now, days_by_region, hours=hours, client=client, competitor_days=competitor_days,
+                        web=config.web_search)
     result["searched"] = len(search.items)
     result["query_stats"] = search.stats
     warnings = list(search.warnings)
@@ -284,12 +288,38 @@ def run_workflow(dry_run: bool = False, hours: Optional[float] = None, use_llm: 
         logger.warning(f"경쟁사 소식 {len(comp_stories)}개 중 최신 {config.max_competitor_items}개만 — 나머지는 다음 실행")
         comp_stories = comp_stories[: config.max_competitor_items]
     competitor_items = [i for g in comp_stories for i in (g.lead, *g.others)]
-    today_comp = [{"title": i.title, "outlet": i.outlet_name, "region": i.region.value,
-                   "day": i.published_at.astimezone(KST).strftime("%m/%d")} for i in competitor_items]
-    main_repeats = _summarize(main_items, recent + today_comp, False)
-    main_repeat_ids = {id(i) for i in main_repeats}
-    main_items = [i for i in main_items if id(i) not in main_repeat_ids]
-    repeats = comp_repeats + main_repeats
+    def _titles(items: list[NewsItem]) -> list[dict]:
+        return [{"title": i.title, "outlet": i.outlet_name, "region": i.region.value,
+                 "day": i.published_at.astimezone(KST).strftime("%m/%d")} for i in items]
+
+    # 주요 언론사 → 업계지 순서. 업계지 요약에는 오늘 경쟁사·주요 언론사 기사도 '보낸 기사'로 준다
+    # (같은 보도자료가 동아일보와 전자신문에 함께 실리면 주요 언론사 쪽에만)
+    # 매체 무관 검색(🔎 기타 매체)은 맨 마지막 — 앞 섹션 어디에든 같은 소식이 있으면 뺀다
+    trade_regions = {Region.TRADE_KR, Region.TRADE_GLOBAL}
+    tiers = [
+        [i for i in main_items if i.region not in trade_regions and i.region not in WEB_REGIONS],
+        [i for i in main_items if i.region in trade_regions],
+        [i for i in main_items if i.region in WEB_REGIONS],
+    ]
+    shown_titles = _titles(competitor_items)
+    main_items, repeats = [], list(comp_repeats)
+    for tier in tiers:
+        tier_repeats = _summarize(tier, recent + shown_titles, False)
+        tier_repeat_ids = {id(i) for i in tier_repeats}
+        kept_tier = [i for i in tier if id(i) not in tier_repeat_ids]
+        repeats += tier_repeats
+        main_items += kept_tier
+        shown_titles += _titles(kept_tier)
+    # 🔎 기타 매체: 섹션당 점수 높은 순 최대 N개 소식 (나머지는 이력에 남기지 않아 다음 실행에서 다시 겨룬다)
+    capped: list[NewsItem] = []
+    for region in WEB_REGIONS:
+        stories = sorted(group_stories([i for i in main_items if i.region == region]),
+                         key=lambda g: (-(g.lead.score or 0.0), -g.lead.published_at.timestamp()))
+        if len(stories) > config.max_web_stories:
+            logger.info(f"{region.value} 소식 {len(stories)}개 중 상위 {config.max_web_stories}개만")
+        capped += [i for g in stories[config.max_web_stories:] for i in (g.lead, *g.others)]
+    capped_ids = {id(i) for i in capped}
+    main_items = [i for i in main_items if id(i) not in capped_ids]
     if repeats:
         logger.info(f"이미 보냈거나 경쟁사 섹션에 있는 소식의 다른 매체 기사 {len(repeats)}건 제외")
     result["repeats_skipped"] = len(repeats)
@@ -299,20 +329,25 @@ def run_workflow(dry_run: bool = False, hours: Optional[float] = None, use_llm: 
     infra_ids = {id(i) for i in infra}
     overflow_infra = [i for i in outcome.infra if id(i) not in infra_ids]
 
-    # 5. 원문 URL 복원 (Slack에 링크가 보이는 기사만: 묶음 대표 + 같은 소식 앞 5개) → 원문 URL로 이력·중복 재확인.
-    #    '외 N곳'으로만 세는 나머지 사본은 복원하지 않는다 (Google 요청 2회씩 — 보도자료는 사본이 10곳 넘게 나온다)
+    # 5. 원문 URL 복원 (묶음 대표 기사만) → 원문 URL로 이력·중복 재확인.
+    #    '같은 소식' 사본은 복원하지 않고 Google News 링크로 둔다 (브라우저에서 원문으로 넘어간다). 복원은 기사마다
+    #    Google 요청 2회라, 사본까지 복원하면 매체 무관 검색을 더한 뒤 실행당 요청이 200회를 넘었다 (2026-11-13 실측)
     def _split_for_decode(items: list[NewsItem]) -> tuple[list[NewsItem], list[NewsItem]]:
         shown, extra = [], []
         for g in group_stories(items):
-            shown += [g.lead, *g.others[:MAX_SAME_STORY_LINKS]]
-            extra += g.others[MAX_SAME_STORY_LINKS:]
+            shown.append(g.lead)
+            extra += g.others
         return shown, extra
 
+    #    🔎 기타 매체와 📎 참고는 복원하지 않는다 — 목록 밖 매체라 경로 필터(보도자료·영상)가 의미가 적고, 링크는
+    #    Google News 링크로도 열린다. 복원 대상은 경쟁사·목록 언론사·업계지 대표 기사뿐이다
     comp_shown, comp_extra = _split_for_decode(competitor_items)
-    main_shown, main_extra = _split_for_decode(main_items)
+    listed = [i for i in main_items if i.region not in WEB_REGIONS]
+    unlisted = [i for i in main_items if i.region in WEB_REGIONS]
+    main_shown, main_extra = _split_for_decode(listed)
     kept, url_warnings = resolve_urls(comp_shown, cache, client=client, competitor_mode=True)
-    kept_topic, topic_warnings = resolve_urls(main_shown + infra, cache, client=client)
-    kept += kept_topic + comp_extra + main_extra
+    kept_topic, topic_warnings = resolve_urls(main_shown, cache, client=client)
+    kept += kept_topic + comp_extra + main_extra + unlisted + infra
     warnings.extend(w for w in url_warnings + topic_warnings if w not in warnings)
     state.update_decoded(cache, now)
     kept = dedupe_resolved([i for i in kept if not state.was_sent(i.history_keys())])
@@ -329,18 +364,39 @@ def run_workflow(dry_run: bool = False, hours: Optional[float] = None, use_llm: 
     result["google_requests"] = client.requests
 
     ctx = DigestContext(run_at=now.astimezone(KST), days_by_region=days_by_region, hours=hours,
-                        candidates=len(candidates), warnings=warnings, repeats_skipped=len(repeats))
+                        candidates=len(candidates), warnings=warnings, repeats_skipped=len(repeats),
+                        html_attached=config.html_report)
     messages = build_messages(main_items, infra, ctx, competitors=competitor_items)
     result["slack_messages"] = len(messages)
+    report_html = build_html(main_items, infra, ctx, competitors=competitor_items) if config.html_report else None
 
     if dry_run:
         result["slack_preview"] = [{"blocks": m.blocks, "text": m.text} for m in messages]
+        if report_html is not None:
+            result["html_preview"] = report_html
         return result
 
+    save_cookies = getattr(client, "save_cookies", None)
+    if save_cookies:
+        save_cookies()
+
     # 6. 전송 → 전송된 메시지에 담긴 기사만 이력 저장 (실패한 메시지의 기사는 다음 실행에서 다시 보낸다)
-    delivered = (notifier or SlackNotifier()).send(messages)
+    if post_at is not None:
+        wait = (post_at - datetime.now(timezone.utc)).total_seconds()
+        if wait > 0:
+            logger.info(f"수집 완료 — {post_at.astimezone(KST):%H:%M} KST 게시까지 {wait / 60:.1f}분 대기")
+            sleep(wait)
+    notifier = notifier or SlackNotifier()
+    delivered = notifier.send(messages)
     sent_ok = 0 in delivered
     result["notification"] = sent_ok
+    if sent_ok and report_html is not None:
+        # HTML 정리본은 본문 메시지 스레드에 (실패해도 본문·이력에는 영향 없음)
+        run_day = now.astimezone(KST)
+        result["html_uploaded"] = notifier.upload_file(
+            report_html.encode("utf-8"), f"aec-news-{run_day:%Y%m%d}.html",
+            f"EPC·AEC × AI 데일리 {run_day:%Y-%m-%d}", thread_ts=getattr(notifier, "last_ts", None),
+            comment="📄 오늘 브리핑 HTML 정리본 — 내려받아 브라우저로 열면 섹션별로 정리된 화면으로 볼 수 있습니다")
     if sent_ok and len(delivered) < len(messages):
         result["warnings"].append(f"Slack 스레드 답글 {len(messages) - len(delivered)}개 전송 실패")
     if use_llm:
@@ -363,14 +419,29 @@ def run_workflow(dry_run: bool = False, hours: Optional[float] = None, use_llm: 
     return result
 
 
-def execute_workflow(dry_run: bool = False, hours: Optional[float] = None, use_llm: bool = True) -> Optional[dict]:
+def scheduled_post_time(start: datetime, config) -> datetime:
+    """수집을 시작한 날(KST)의 게시 시각. 이미 지났으면(늦게 시작) 그 시각을 그대로 돌려줘 바로 게시한다
+    (다음 날로 넘기면 하루를 기다린다)"""
+    local = start.astimezone(KST)
+    return local.replace(hour=config.schedule_hour, minute=config.schedule_minute, second=0, microsecond=0)
+
+
+def execute_scheduled():
+    """스케줄 진입점: 게시 시각보다 lead_minutes 먼저 시작해 사람 속도로 수집하고, 게시 시각에 올린다"""
+    config = get_config()
+    post_at = scheduled_post_time(datetime.now(timezone.utc), config)
+    execute_workflow(post_at=post_at)
+
+
+def execute_workflow(dry_run: bool = False, hours: Optional[float] = None, use_llm: bool = True,
+                     post_at: Optional[datetime] = None) -> Optional[dict]:
     """APScheduler 진입점 — 동시 실행 방지 + 예외 로그"""
     if not _run_lock.acquire(blocking=False):
         logger.warning("이전 실행이 아직 진행 중 - 이번 실행 건너뜀")
         return None
     try:
         logger.info("EPC·AEC AI 뉴스 모니터링 시작")
-        result = run_workflow(dry_run=dry_run, hours=hours, use_llm=use_llm)
+        result = run_workflow(dry_run=dry_run, hours=hours, use_llm=use_llm, post_at=post_at)
         log_result = {k: v for k, v in result.items() if k != "slack_preview"}
         logger.info(f"완료: {json.dumps(log_result, ensure_ascii=False, default=str)}")
         return result
@@ -407,12 +478,18 @@ def main(argv: Optional[list[str]] = None):
     parser.add_argument("--hours", type=float, default=None, help="수집 기간(시간) 직접 지정")
     parser.add_argument("--no-llm", action="store_true", help="Bedrock 없이 키워드 규칙으로 선별")
     parser.add_argument("--json", action="store_true", help="dry-run 결과를 JSON으로 출력")
+    parser.add_argument("--html-out", default="/tmp/aec-news-preview.html", help="dry-run HTML 정리본 저장 경로")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
     if args.dry_run:
         result = run_workflow(dry_run=True, hours=args.hours, use_llm=not args.no_llm)
+        report = result.pop("html_preview", None)
+        if report is not None and args.html_out:
+            with open(args.html_out, "w", encoding="utf-8") as f:
+                f.write(report)
+            logger.info(f"HTML 정리본 미리보기: {args.html_out}")
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=1, default=str))
         else:
@@ -429,17 +506,20 @@ def main(argv: Optional[list[str]] = None):
     from apscheduler.triggers.cron import CronTrigger
 
     config = get_config()
+    start = (datetime(2000, 1, 1, config.schedule_hour, config.schedule_minute)
+             - timedelta(minutes=config.lead_minutes))
     scheduler = BlockingScheduler(timezone=KST)
     scheduler.add_job(
-        execute_workflow,
-        CronTrigger(hour=config.schedule_hour, minute=config.schedule_minute, timezone=KST),
+        execute_scheduled,
+        CronTrigger(hour=start.hour, minute=start.minute, timezone=KST),
         id="aec_news_monitor",
         name="AEC News Monitor",
         misfire_grace_time=3600,   # 시스템이 잠깐 멈췄다 돌아와도 1시간 안이면 실행
         coalesce=True,
         max_instances=1,
     )
-    logger.info(f"스케줄러 시작: 매일 {config.schedule_hour:02d}:{config.schedule_minute:02d} KST")
+    logger.info(f"스케줄러 시작: 매일 {start:%H:%M} KST 수집 시작 → {config.schedule_hour:02d}:"
+                f"{config.schedule_minute:02d} KST 게시")
     if config.run_on_start:
         logger.info("AEC_NEWS_RUN_ON_START=1 — 시작 시 1회 실행")
         execute_workflow()

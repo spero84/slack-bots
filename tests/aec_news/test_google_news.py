@@ -9,13 +9,13 @@ import pytest
 import requests
 
 from src.aec_news import google_news as gn
-from src.aec_news.config import MAX_QUERY_CHARS, OUTLETS, SEARCH_TERMS
+from src.aec_news.config import MAX_QUERY_CHARS, OUTLETS, SEARCH_TERMS, outlet_takes_kind
 from src.aec_news.models import Region, Theme
 
 from .conftest import make_item
 
 NOW = datetime(2026, 11, 12, 23, 30, tzinfo=timezone.utc)   # 11/13 08:30 KST
-ALL_DAYS = {Region.KR: 2, Region.US: 7, Region.SG: 7, Region.GLOBAL: 7}
+ALL_DAYS = {r: (2 if r in (Region.KR, Region.TRADE_KR) else 7) for r in Region}
 
 
 def rss(*items: tuple[str, str, str, str, str]) -> bytes:
@@ -48,10 +48,48 @@ def test_every_outlet_is_searched_for_every_theme():
     for kind, by_region in SEARCH_TERMS.items():
         for region in by_region:
             covered = {k for q in queries if q.kind == kind and q.region == region for k in q.outlet_keys}
-            expected = {k for k, o in OUTLETS.items() if o.region == region}
+            expected = {k for k, o in OUTLETS.items() if o.region == region and outlet_takes_kind(o, kind)}
             assert covered == expected, (kind, region)
-    # 점검 쿼리: 국내·미국·싱가포르 1개, 글로벌은 지역판별(en-GB, en-IN) 2개
-    assert sorted(q.region.value for q in queries if q.kind == "health") == ["GLOBAL", "GLOBAL", "KR", "SG", "US"]
+    # 점검 쿼리: 국내·미국·싱가포르·업계지(국내) 1개, 글로벌은 지역판별(en-GB, en-IN) 2개
+    assert sorted(q.region.value for q in queries if q.kind == "health") == [
+        "GLOBAL", "GLOBAL", "KR", "SG", "TRADE_KR", "US"]
+
+
+def test_watch_sites_use_user_keyword_groups():
+    queries = gn.build_queries(ALL_DAYS)
+    by_kind = {}
+    for q in queries:
+        by_kind.setdefault(q.kind, set()).update(q.outlet_keys)
+    focused = {"enr", "constructiondive", "bdcnetwork", "constructionexec", "aecmag", "archrecord", "builtworlds",
+               "ikld", "conslove"}
+    tech = {"techcrunch", "venturebeat", "techreview", "theinformation", "svbj", "dnews", "etnews", "zdnet", "bloter",
+            "hankyung", "mk", "reuters"}
+    assert by_kind["w_focus"] == focused
+    for kind in ("w_aec", "w_design", "w_doc", "w_contech"):
+        assert by_kind[kind] == tech, kind
+    # 매일 확인 사이트는 기존 주제 검색어 대신 사용자 키워드 (rag만 공통), 나머지 언론사는 기존 그대로
+    watch = focused | tech
+    for kind in ("drawing", "aec_ai", "ai"):
+        assert not by_kind.get(kind, set()) & watch, kind
+    assert {"chosun", "nytimes", "engineeringcom"} <= by_kind["aec_ai"]
+    assert all(q.days == 2 for q in queries if q.region == Region.TRADE_KR and q.kind != "health")
+
+
+def test_user_watch_list_is_configured():
+    us = {"enr", "constructiondive", "bdcnetwork", "techcrunch", "venturebeat", "reuters", "constructionexec", "aecmag",
+          "archrecord", "techreview", "theinformation", "builtworlds", "svbj"}
+    kr = {"dnews", "etnews", "zdnet", "hankyung", "mk", "ikld", "conslove", "bloter"}
+    assert {k for k, o in OUTLETS.items() if o.watch} == us | kr
+    assert OUTLETS["svbj"].keep_paths == ("/sanjose/",)
+
+
+def test_keep_paths_drops_other_city_business_journals():
+    sj = make_item(1, outlet_key="svbj", outlet_name="Silicon Valley Business Journal", region=Region.TRADE_GLOBAL)
+    ny = make_item(2, outlet_key="svbj", outlet_name="Silicon Valley Business Journal", region=Region.TRADE_GLOBAL)
+    cache = {sj.google_id: "https://www.bizjournals.com/sanjose/news/2026/11/12/ai-construction.html",
+             ny.google_id: "https://www.bizjournals.com/newyork/news/2026/11/12/other.html"}
+    kept, _ = gn.resolve_urls([sj, ny], cache, client=make_client([])[0])
+    assert kept == [sj]
 
 
 def test_site_groups_share_one_edition():
@@ -484,3 +522,170 @@ def test_stock_analysis_hosts_are_blocked_for_competitors():
     for host in ("www.judal.co.kr", "kr.tradingview.com", "stockstory.org"):
         assert gn.is_blocked_competitor_host(host), host
     assert not gn.is_blocked_competitor_host("www.aitimes.com")
+
+
+# --- 매체 무관 검색 ---
+
+def test_web_queries_have_no_site_filter_and_fit():
+    queries = gn.build_web_queries()
+    assert queries and all(q.open and "site:" not in q.q for q in queries)
+    assert max(len(q.q) for q in queries) <= MAX_QUERY_CHARS
+    assert {q.region for q in queries} == {Region.WEB_KR, Region.WEB_GLOBAL}
+    assert all(q.edition == "ko" for q in queries if q.region == Region.WEB_KR)
+    assert all(q.days == 1 for q in gn.build_web_queries(days_override=1))
+
+
+def test_web_feed_routes_listed_outlets_to_their_section():
+    query = gn.SearchQuery("drawing", Region.WEB_KR, "q", (), 2, "ko", open=True)
+    content = rss(
+        ("AI로 전통 건축도면 분석·복원 - 대한건축사협회 건축사신문", "https://www.ancnews.kr", "대한건축사협회 건축사신문", pub(3), "W1"),
+        ("인포시즈, 서울대와 도면 AI - AI타임스", "https://www.aitimes.com", "AI타임스", pub(4), "W2"),
+        ("쪼개 읽던 산업 도면, AI가 통째로 읽는다 - 동아일보", "https://www.donga.com", "동아일보", pub(5), "W3"),
+        ("도면 AI 블로그 - 브런치", "https://brunch.co.kr", "브런치", pub(5), "W4"),
+        ("Drawing AI English - Vietnam.vn", "https://www.vietnam.vn", "Vietnam.vn", pub(5), "W5"),
+    )
+    items = gn.parse_feed(content, query, NOW - timedelta(days=2, hours=2), NOW, gn.QueryStat("WEB_KR", "d", ""))
+    assert [i.google_id for i in items] == ["W1", "W2", "W3"]
+    assert items[0].region == Region.WEB_KR and items[0].outlet_key == "web:www.ancnews.kr"
+    assert items[2].region == Region.KR and items[2].outlet_key == "donga"        # 목록 언론사는 그 섹션으로
+    assert all(i.query_themes == [Theme.DRAWING_BIM] for i in items)
+
+
+# --- 사용자 키워드표 (keywords_en / keywords_kr, 2026-11-13) 포함 확인 ---
+# 키워드·유사 키워드마다, 그 표현을 잡는 검색어 조각(intitle: 단위)이 어떤 묶음에 들어 있는지.
+# 'AI in construction'처럼 여러 단어 표현은 같은 묶음 안의 두 조각(intitle:AI + intitle:construction)으로 잡는다.
+USER_KEYWORDS_EN = {
+    "EPC / AECO + AI": ["intitle:EPC", "intitle:AECO", "intitle:AEC", "intitle:AI", 'intitle:"artificial intelligence"'],
+    "AI in construction": ["intitle:AI", "intitle:construction"],
+    "construction automation": ['intitle:"construction automation"'],
+    "BIM AI / BIM automation / AI BIM": ["intitle:BIM"],
+    "Revit AI": ["intitle:Revit"],
+    "Design Automation": ['intitle:"design automation"'],
+    "AI design review": ['intitle:"design review"'],
+    "design validation": ['intitle:"design validation"'],
+    "Drawing Review / AI drawing review": ['intitle:"drawing review"'],
+    "drawing comparison": ['intitle:"drawing comparison"'],
+    "revision detection": ['intitle:"revision detection"'],
+    "Document AI / construction document AI / Enterprise Document AI": ['intitle:"document AI"'],
+    "document intelligence": ['intitle:"document intelligence"'],
+    "Construction AI Agents / AI agent construction": ["intitle:AI", "intitle:construction"],
+    "construction agent": ['intitle:"construction agent"'],
+    "Construction Tech / ConTech": ["intitle:ConTech", 'intitle:"construction tech"'],
+    "construction software": ['intitle:"construction software"'],
+    "Intelligent Document Processing (IDP)": ["intitle:IDP", 'intitle:"document processing"'],
+    "Document Understanding": ['intitle:"document understanding"'],
+    "Enterprise Document AI": ['intitle:"enterprise document"'],
+}
+USER_KEYWORDS_KR = {
+    "건설 AI / 건설업 AI / 시공 AI": ["intitle:AI", "intitle:건설", "intitle:건설업", "intitle:시공"],
+    "건설 인공지능": ["intitle:인공지능", "intitle:건설"],
+    "스마트건설 / 스마트 건설(기술)": ["intitle:스마트건설", 'intitle:"스마트 건설"'],
+    "건설 AX / 건설 DX": ['intitle:"건설 AX"', 'intitle:"건설 DX"'],
+    "건설 디지털 전환": ['intitle:"건설 디지털"'],
+    "BIM 자동화 / BIM AI / BIM 설계 자동화 / AI BIM": ["intitle:BIM"],
+    "설계 자동화": ['intitle:"설계 자동화"'],
+    "AI 설계": ['intitle:"AI 설계"'],
+    "설계 검토 자동화": ['intitle:"설계 검토"'],
+    "AI 도면 검토 / 도면 분석 AI / 도면 비교 / 도면 검증": ["intitle:도면"],
+    "건설 문서 AI / 건설 문서 검색": ['intitle:"건설 문서"'],
+    "시방서 AI": ["intitle:시방서"],
+    "계약서 AI": ['intitle:"계약서 AI"'],
+    "건설 AI 에이전트 / 건설 특화 AI 에이전트 / 건설 AI Agent": ["intitle:에이전트", "intitle:AI", "intitle:건설"],
+    "건설 프로젝트 데이터 / 건설 데이터 통합": ['intitle:"건설 데이터"'],
+    "프로젝트 정보 관리": ['intitle:"프로젝트 정보"'],
+    "문서 AI": ['intitle:"문서 AI"'],
+    "AI 문서 분석 / AI 문서 검색": ['intitle:"AI 문서"'],
+    "지능형 문서 처리": ['intitle:"지능형 문서"'],
+}
+
+
+def _fragments(text):
+    import re
+    return set(re.findall(r'intitle:(?:"[^"]+"|[^\s()]+)', text))
+
+
+def test_every_user_keyword_and_synonym_is_searched():
+    from src.aec_news.config import WATCH_TERMS, WEB_QUERIES
+    for lang, table in (("en", USER_KEYWORDS_EN), ("ko", USER_KEYWORDS_KR)):
+        groups = [_fragments(v[lang]) for v in WATCH_TERMS.values() if lang in v]
+        web_groups = [_fragments(q) for q, ed, _, _ in WEB_QUERIES if (ed == "ko") == (lang == "ko")]
+        for keyword, needed in table.items():
+            # 매일 확인 사이트 검색어 묶음과 매체 무관 검색어 양쪽에, 필요한 조각이 '하나의 묶음 안에' 모두 있어야 한다
+            # (needed 중 하나라도 있으면 되는 '또는' 목록은 첫 조각만 필수로 본다)
+            first = needed[0]
+            combo = needed if keyword.startswith(("AI in", "Construction AI Agents", "건설 인공지능", "건설 AI 에이전트")) \
+                else [first]
+            assert any(all(f in g for f in combo) for g in groups), (lang, keyword, "watch")
+            assert any(all(f in g for f in combo) for g in web_groups), (lang, keyword, "web")
+            # 표의 모든 표현(조각)이 매일 확인 사이트 검색어와 매체 무관 검색어 어딘가에 있어야 한다
+            for f in needed:
+                assert any(f in g for g in groups), (lang, keyword, f, "watch")
+                assert any(f in g for g in web_groups), (lang, keyword, f, "web")
+
+
+# --- 사람 같은 요청 속도 (2026-11-13 사용자 요청) ---
+
+def human_client(responses, seed=7):
+    import random
+    t = [1000.0]
+    sleeps = []
+
+    def fake_sleep(sec):
+        sleeps.append(sec)
+        t[0] += sec
+
+    session = FakeSession(responses)
+    client = gn.GoogleNewsClient(session=session, sleep=fake_sleep, monotonic=lambda: t[0], rng=random.Random(seed))
+    return client, session, sleeps
+
+
+def test_human_pacing_random_gaps_and_reading_breaks():
+    client, _, sleeps = human_client([FakeResp(200) for _ in range(45)])
+    for n in range(45):
+        client.request("GET", f"https://news.google.com/rss/search?q={n}")
+    gaps = sleeps
+    assert len(gaps) == 44
+    normal = [g for g in gaps if g < 10]
+    breaks = [g for g in gaps if g >= 25]
+    assert all(4.0 <= g <= 9.0 for g in normal)
+    assert 2 <= len(breaks) <= 4                      # 12~20회마다 한 번
+    assert all(29.0 <= g <= 69.0 for g in breaks)     # 휴식 25~60초 + 그 회차 간격
+    assert len(set(round(g, 3) for g in normal)) > 30  # 간격이 일정하지 않다
+
+
+def test_decode_pauses_between_page_and_post():
+    client, session, sleeps = human_client([FakeResp(200, ARTICLE_PAGE),
+                                            FakeResp(200, batch_body("https://www.donga.com/news/1"))])
+    assert client.decode("https://news.google.com/rss/articles/CBMiAU_yqLabc?oc=5") == "https://www.donga.com/news/1"
+    assert len(sleeps) == 1 and 0.6 <= sleeps[0] <= 1.6     # 첫 요청은 대기 없음, GET→POST 사이만
+
+
+def test_edition_language_header_and_shuffled_order():
+    queries = gn.build_queries(ALL_DAYS)
+    client, session, _ = human_client([FakeResp(200, content=rss()) for _ in range(400)])
+    gn.search_all(NOW, ALL_DAYS, client=client)
+    urls = [c[1] for c in session.calls]
+    assert sorted(urls) == sorted(q.url for q in queries)
+    assert urls != [q.url for q in queries]                  # 순서를 섞는다
+    for method, url, kwargs in session.calls:
+        lang = kwargs["headers"]["Accept-Language"]
+        assert lang.startswith("ko-KR") if "hl=ko" in url else lang.startswith("en-")
+
+
+def test_test_client_keeps_order_without_waits():
+    queries = gn.build_queries(ALL_DAYS)
+    client, session, sleeps = make_client([FakeResp(200, content=rss()) for _ in range(400)])
+    gn.search_all(NOW, ALL_DAYS, client=client)
+    assert [c[1] for c in session.calls] == [q.url for q in queries] and sleeps == []
+
+
+def test_google_cookies_persist_between_runs(tmp_path):
+    import http.cookiejar
+    path = str(tmp_path / "state" / "google_cookies.txt")
+    client = gn.GoogleNewsClient(interval=0, cookie_path=path)
+    cookie = http.cookiejar.Cookie(0, "NID", "abc", None, False, ".google.com", True, True, "/", True, True,
+                                   4102444800, False, None, None, {})
+    client.session.cookies.set_cookie(cookie)
+    client.save_cookies()
+    again = gn.GoogleNewsClient(interval=0, cookie_path=path)
+    assert {c.name: c.value for c in again.session.cookies} == {"NID": "abc"}
