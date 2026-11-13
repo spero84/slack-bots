@@ -10,16 +10,18 @@ from pydantic import BaseModel, Field
 
 
 class Region(str, Enum):
-    """언론사 국가"""
+    """언론사 구분 (Slack 섹션 순서)"""
     KR = "KR"
     US = "US"
     SG = "SG"
+    GLOBAL = "GLOBAL"      # 미국·싱가포르 밖의 글로벌 언론사 (영국, 인도, 중동 등)
 
 
 REGION_LABELS = {
     Region.KR: "🇰🇷 국내",
     Region.US: "🇺🇸 미국",
     Region.SG: "🇸🇬 싱가포르",
+    Region.GLOBAL: "🌐 글로벌",
 }
 
 
@@ -90,6 +92,10 @@ class NewsItem(BaseModel):
     snippet: str = ""
     query_themes: list[Theme] = Field(default_factory=list, description="이 기사를 찾은 검색 주제들")
     alias_ids: list[str] = Field(default_factory=list, description="같은 기사로 합친 다른 Google ID (AMP 사본 등)")
+    competitor_hits: list[str] = Field(default_factory=list, description="경쟁사 후보 키 (경쟁사 검색 또는 제목의 회사명)")
+    competitor: Optional[str] = Field(default=None, description="Bedrock이 확인한 경쟁사 키 (🏁 경쟁사 섹션)")
+    mention: Optional[str] = Field(default=None, description="경쟁사 이름 위치: title(제목) / body(본문에만)")
+    excerpt: str = Field(default="", description="원문 본문에서 경쟁사 이름 주변 발췌 (본문 언급 확인용)")
 
     # Bedrock 판정 결과
     score: Optional[float] = None

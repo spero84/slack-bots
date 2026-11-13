@@ -5,6 +5,7 @@
   Google News는 미국 언론사 검색에서 `when:` 기간 조건을 자주 무시하므로 날짜 필터만으로는 부족하다.
 - judged: Bedrock이 관련 없다고 판정한 기사 키 → 만료 시각. 같은 기사를 매일 다시 판정하지 않는다.
 - decoded: Google News 기사 ID → 원문 URL. 복원에 요청 2회가 들어 결과를 재사용한다.
+- recent: 최근 5일 동안 보낸 기사 제목. 같은 보도자료가 다음 날 다른 매체에 또 실리면 Bedrock이 이 목록과 비교해 뺀다.
 
 파일은 임시 파일에 쓴 뒤 rename으로 교체한다 (실행 중 중단돼도 깨진 JSON이 남지 않음).
 """
@@ -20,6 +21,8 @@ DEFAULT_STATE_DIR = "/home/ubuntu/.local/state/aec-news"
 SENT_KEEP_DAYS = 45
 REJECT_KEEP_DAYS = 10
 DECODED_KEEP_DAYS = 30
+RECENT_KEEP_DAYS = 5
+RECENT_MAX = 300
 
 
 def _now() -> datetime:
@@ -46,6 +49,7 @@ class RunState:
         self.sent: dict[str, str] = {}
         self.judged: dict[str, dict] = {}
         self.decoded: dict[str, dict] = {}
+        self.recent: list[dict] = []
 
     def load(self) -> "RunState":
         """상태 파일 로드 (없거나 깨졌으면 빈 상태)"""
@@ -71,6 +75,9 @@ class RunState:
             {k: v for k, v in decoded.items() if isinstance(v, dict) and isinstance(v.get("url"), str)}
             if isinstance(decoded, dict) else {}
         )
+        recent = data.get("recent")
+        self.recent = [r for r in recent if isinstance(r, dict) and isinstance(r.get("title"), str)] \
+            if isinstance(recent, list) else []
         return self
 
     def _prune(self, now: datetime):
@@ -81,6 +88,8 @@ class RunState:
         }
         decoded_cutoff = now - timedelta(days=DECODED_KEEP_DAYS)
         self.decoded = {k: v for k, v in self.decoded.items() if (_parse(v.get("at")) or now) > decoded_cutoff}
+        recent_cutoff = now - timedelta(days=RECENT_KEEP_DAYS)
+        self.recent = [r for r in self.recent if (_parse(r.get("at")) or now) > recent_cutoff][-RECENT_MAX:]
 
     def save(self):
         """상태 저장 (만료 항목 정리 후 원자적 교체). 실패해도 예외를 올리지 않는다."""
@@ -91,6 +100,7 @@ class RunState:
             "sent": self.sent,
             "judged": self.judged,
             "decoded": self.decoded,
+            "recent": self.recent,
         }
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -137,3 +147,13 @@ class RunState:
         for key, url in cache.items():
             if key not in self.decoded or self.decoded[key].get("url") != url:
                 self.decoded[key] = {"url": url, "at": stamp}
+
+    # --- 최근 보낸 기사 제목 (다른 매체의 같은 소식 걸러내기) ---
+
+    def recent_titles(self, now: Optional[datetime] = None) -> list[dict]:
+        cutoff = (now or _now()) - timedelta(days=RECENT_KEEP_DAYS)
+        return [r for r in self.recent if (_parse(r.get("at")) or cutoff) > cutoff]
+
+    def add_recent(self, title: str, outlet: str, region: str, day: str, now: Optional[datetime] = None):
+        self.recent.append({"title": title, "outlet": outlet, "region": region, "day": day,
+                            "at": (now or _now()).isoformat()})

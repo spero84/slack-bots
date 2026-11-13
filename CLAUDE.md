@@ -52,7 +52,7 @@ set -a; . ./.env; set +a
 /home/ubuntu/venvs/gov-funding/bin/python -m src.gov_funding.main --seed     # 알림 없이 저장만
 /home/ubuntu/venvs/gov-funding/bin/python -m src.gov_funding.main --once     # 실제 1회 실행
 
-# aec-news 수동 실행 — Google News 요청 ~22회(3초 간격) + 원문 URL 복원, 약 2분
+# aec-news 수동 실행 — Google News 요청 ~90~150회(검색 62 + 원문 URL 복원·본문 확인, 3초 간격), 약 6~9분
 set -a; . ./.env; set +a
 /home/ubuntu/venvs/aec-news/bin/python -m src.aec_news.main --dry-run          # Slack 전송/상태 저장 없이 미리보기 (Bedrock 호출함)
 /home/ubuntu/venvs/aec-news/bin/python -m src.aec_news.main --dry-run --json   # 결과 JSON (쿼리별 통계 포함)
@@ -134,7 +134,20 @@ HTML 스크래핑보다 RSS가 안정적이다. 실제로 세 소스가 조용�
 
 ### aec-news (EPC·AEC × AI 뉴스 링크 정리)
 
-매일 08:30 KST, 채널 `C0CGZRXP5JS`(#searchdoc-global-news). 국내 10(조선·중앙·동아·한겨레·경향·연합·한경·매경·서경·머투), 미국 10(NYT·WSJ·WaPo·Reuters·Bloomberg·AP·CNBC·CNN·Forbes·USA Today), 싱가포르 4(Straits Times·Business Times·CNA·The Edge Singapore) 언론사에서 사용자 지정 키워드(EPC & AI, AEC & AI, EPC & RAG, AEC & RAG, AI와 Drawings/BIM)로 검색해 기사 링크를 국가별로 정리한다. 언론사·검색어는 `src/aec_news/config.py` (`_OUTLET_LIST`, `SEARCH_TERMS`).
+매일 08:30 KST, 채널 `C0CGZRXP5JS`(#searchdoc-global-news). 메시지 순서: **🏁 경쟁사 동향**(22곳) → 🇰🇷 국내 / 🇺🇸 미국 / 🇸🇬 싱가포르 / 🌐 글로벌 주제 기사 → 📎 참고(AI 인프라 EPC). 주제 기사는 국내 10(조선·중앙·동아·한겨레·경향·연합·한경·매경·서경·머투)과 해외 30곳에서 사용자 지정 키워드(EPC & AI, AEC & AI, EPC & RAG, AEC & RAG, AI와 Drawings/BIM)로 찾는다. 언론사·검색어·경쟁사는 `src/aec_news/config.py` (`_OUTLET_LIST`, `SEARCH_TERMS`, `COMPETITORS`, `COMPETITOR_QUERIES`).
+
+**해외 30곳 (2026-11-13 사용자 요청 "글로벌 뉴스 사이트 순위 기반 30개"):** Press Gazette 'Top 50 English-language news sites in the world'(Similarweb 2026년 10월 방문 수) 순위에서 포털·애그리게이터(MSN, Yahoo, Google News)·플랫폼(Substack)·연예(People)·oneindia를 빼고 위에서부터 골랐다. 미국 14(NYT·CNN·Fox·CNBC·NY Post·Reuters·AP·USA Today·WSJ·NBC·WaPo·CBS·Forbes·Bloomberg), 싱가포르 4(사용자 지정, 순위 밖), 글로벌 12(BBC·Guardian·Daily Mail·Times of India(+Economic Times)·NDTV·Hindustan Times·Indian Express·News18·The Hindu·CBC·ABC Australia·Al Jazeera). Bloomberg(46위)는 EPC·인프라 거래 기사 때문에 유지했다 — 엄격히 순위대로면 33위 The Independent 자리다. 순위는 달마다 바뀐다(9월엔 Telegraph 30위). 언론사마다 Google 지역판(`Outlet.edition`)이 있고 `site:` 묶음은 같은 지역판끼리만 만든다: 영국 en-GB, 인도 en-IN(en-US판보다 기사가 2배 많고 최신), 싱가포르 en-SG, 나머지 en-US. indiatimes.com은 여러 매체가 한 도메인이라 `timesofindia.`/`economictimes.`만 받는다(ET 업종 버티컬 20여 곳은 태그 페이지). 실측 30일 동안 새 일반 매체 16곳에서 AI×건설 기사(ai_tech)는 0건이었다 — 순위 기반이라 넣었지만 물량은 대부분 국내·Forbes·경쟁사 섹션에서 나온다.
+
+**🏁 경쟁사 동향 (2026-11-13 사용자 요청, 같은 날 6곳 추가):** 건설 스타트업 국내(포비콘, 인포시즈, 플랜바이테크놀로지스, 두아즈), 건설 스타트업 글로벌(Datagrid(Procore 인수), Beam AI(Attentive.ai, ibeam.ai), Trunk Tools, Primepoint, Wyre AI, Egnyte, Nomic, VIKTOR, Provision, Document Crunch(Trimble 인수), SWAPP), RAG 국내(BHSN, 한국딥러닝, 올거나이즈, 클라이원트, 그래파이, 와이즈넛, 사이오닉에이아이).
+- **언론사 제한 없이 찾는다** (`site:` 없음). 경쟁사 기사의 85%는 IT·스타트업 매체, 업계지(ENR, AEC Magazine, Construction Dive), 보도자료(Business Wire, GlobeNewswire, Yahoo Finance 재게시)에 실린다. 블로그·재게시·자동 생성 페이지(brunch, 네이버 블로그, v.daum.net, dealroom, getlatka, g2 등)는 `COMPETITOR_BLOCK_HOSTS`, 목록 언론사의 잡음 하위 도메인(stock.mk.co.kr 등)도 뺀다
+- **국내 사명은 이름 하나씩 검색한다.** OR로 묶으면 Google이 본문 언급 기사부터 버린다(포비콘 180일 9건 → 3건). `intitle:`도 쓰지 않는다 — 포비콘·클라이원트·두아즈는 협력사·발표자·데이터 출처로 **본문에만** 나온다. 해외 이름도 OR 묶음은 관련도순 몇 건만 돌려줘 물량 많은 회사가 다른 회사를 밀어낸다(Document Crunch를 묶었더니 진짜 소식이 빠졌다) — 묶음은 Trunk Tools·Wyre AI만, Egnyte·Document Crunch는 따로
+- **동명이인이 심하다:** Datagrid(뉴질랜드 데이터센터 개발사가 결과의 87% → `Datagrid Procore`), VIKTOR(오르반·요케레스 등 인물, Slack용 AI 동료 'Viktor' → `intitle:` + 업종 단서 + `-Orbán` 제외어), Provision(일반 명사 → `intitle:` + 프리컨 단서), Nomic(Nomic Bio, Nomic 체인, 'economic' 퍼지 매칭 → `intitle:Nomic` + AEC 단서), Beam AI(Reflection의 Beam, Google Beam), Attentive(SMS 마케팅사), PrimePoint(미국 급여·HR사), BHSN(미국 학교 약칭 — ko판에서만 검색), 두아즈(오보이스트 올리비에 두아즈 → `-올리비에`), 그래파이(흑연 '그래파이트'·치과 소재사 그래피·미국 'Graph AI' → 태그는 `그래파이(?!트)`, 영문 검색 안 함), 사이오닉(바이오닉 의수 PSYONIC·미국 결제사 Sionic → 맨이름으로 검색하되 태그는 `사이오닉 ?AI` 등만), SWAPP(성씨·Swapp Design·'swap' 확장 매칭 → `"SWAPP"` + AEC 단서 + `-obituary`), Document Crunch(Trimble 인수 뒤 Trimble 이름 보도자료가 본문에서만 언급 → 따옴표 검색 + 본문 확인). 와이즈넛·올거나이즈는 상장사라 시황·특징주·IPO 비교기업 기사가 섞인다 → 프롬프트 점수 기준 0.2~0.4, 자동 투자분석 사이트(judal, tradingview, stockstory)는 `COMPETITOR_BLOCK_HOSTS`. Bedrock이 회사 소개(`Competitor.what`)와 대조해 그 회사 기사인지 확인한다(`verify_competitors`, score ≥ `AEC_NEWS_COMPETITOR_THRESHOLD` 0.5)
+- **제목에 이름이 없는 후보는 원문 본문을 확인한다** (`check_competitor_mentions` → `article_text.py`). Google RSS description은 제목뿐이고, Google은 사이드바·관련 기사 문구로도 매칭한다(실측 본문 확인 15건 중 10건이 이름 없음). 원문 URL을 복원해 페이지를 받고, 본문 컨테이너(`articleBody`, `article-view-content-div`, `story-news` …)에서 관련·인기 기사·광고 블록을 빼고 '관련기사' 표시 뒤를 버린 다음 이름 주변을 발췌해 Bedrock에 넘긴다. 이름이 없으면 탈락 캐시. 봇 확인 페이지(Incapsula 등)·받기 실패는 '미룸'(캐시하지 않음). 실행당 `AEC_NEWS_MAX_BODY_CHECKS`(15)건까지 **국내 후보 먼저**(국내는 본문 언급이 실제 소식인 경우가 많고 해외는 사이드바 매칭이 대부분), 나머지는 다음 실행(경쟁사 검색 기간 7일 안에서 차례로 확인된다). Slack에는 `본문 언급`으로 표시. 본문 추출은 `itemprop=articleBody` → 본문 class/id 컨테이너 중 가장 긴 것 → 페이지 전체 순이고, 짝이 안 맞는 태그는 태그 스택으로 처리한다(깊이 카운터는 sloppy HTML에서 본문을 일찍 닫았다). '관련기사' 같은 목록 제목은 **짧은 텍스트 노드 전체**일 때만 그 블록을 건너뛴다(문장 속 'more on', '관련 기사'에서 자르면 회사명을 놓친다)
+- 주제 검색으로 찾은 기사도 제목에 경쟁사의 **고유 이름**(`Competitor.tag_aliases` — Provision·Viktor·Datagrid 같은 일반어는 넣지 않는다)이 있으면 경쟁사 확인을 거쳐 🏁 섹션으로 옮긴다(두 섹션에 중복되지 않음). 경쟁사가 아니라고 나온 기사 중 주제 검색으로도 찾은 기사는 주제 판정으로 넘긴다
+- 실측 물량: 국내는 인포시즈·한국딥러닝·와이즈넛·사이오닉이 주 수 건(같은 보도자료가 10~18개 매체에), 나머지는 월 0~2건. 해외 11곳은 30일에 실제 소식 약 8건 — 빈 주가 보통이다. 0건 경고는 내지 않는다
+- 상한 `AEC_NEWS_MAX_COMPETITOR`(15)는 **소식 묶음 단위**다(기사 단위로 세면 보도자료 하나가 상한을 다 썼다). 원문 URL 복원은 Slack에 링크가 보이는 대표 + 같은 소식 앞 5개만 한다('외 N곳' 사본은 복원하지 않고 '보냄'으로만 기록). 첫 실행은 7일치 밀린 기사 때문에 Google 요청이 ~150회, 이후에는 URL 캐시·판정 캐시로 ~80~90회
+
+**이미 보낸 소식 다시 안 보내기:** 보도자료는 며칠에 걸쳐 여러 매체에 실린다. 기사 키(언론사+제목, URL)만으로는 다른 매체의 같은 소식을 못 막아서, `summarize()`에 최근 5일 보낸 기사 제목(`state.recent`)을 함께 주고 같은 사건·발표면 `already_sent`로 표시하게 한다. 같은 소식 묶음의 절반 이상이 표시되면 묶음 전체를 빼고 '보냄'으로 기록한다(`drop_repeated_stories`, Slack 하단에 `ℹ️ … N건은 뺐습니다`). 후속 보도(새 사실)는 빼지 않는다. 요약·재탕 제거는 URL 복원 **전에** 해서 복원 요청을 줄인다. 같은 소식 링크는 5개까지(`외 N곳`).
 
 **Google News RSS 주의사항 (2026-11-12 실측):**
 - **`q`가 200자를 넘으면 Google이 뒤를 조용히 잘라 `when:`이 빠진다** — 오류 없이 수년 전 기사까지 돌아온다 (200자 정상, 201자부터 무시). 그래서 `build_queries()`가 언론사를 묶어 190자 이하로 만들고(`MAX_QUERY_CHARS`), 테스트가 모든 쿼리 길이를 검사한다. 언론사나 검색어를 늘리면 쿼리 수가 늘어날 뿐이다. 그래도 오래된 기사가 섞이므로 게시 시각은 코드에서 다시 거르고, 기간 밖 기사가 절반을 넘는 쿼리는 `검색 기간 조건이 무시된 쿼리` 경고를 낸다
@@ -154,7 +167,7 @@ HTML 스크래핑보다 RSS가 안정적이다. 실제로 세 소스가 조용�
 - summarize: 통과 기사의 한국어 한 줄 요약 + 같은 국가의 같은 소식 묶음 번호. 보도자료 기반 기사가 여러 매체에 동시에 실려 대표 1건 + `같은 소식:` 링크로 묶는다
 - triage 실패 배치는 `keyword_fallback()`(제목 규칙)으로 고르고 `⚠️ AI 관련성 판정 실패` 표시, 요약 실패는 링크만 보낸다. 정규식에서 `\b`는 'AI가'처럼 한글이 붙으면 매칭되지 않아 영문 경계 `(?<![A-Za-z])AI(?![A-Za-z])`를 쓰고, AI/RAG/BIM/CAD는 대소문자를 구분한다('rag & bone', 'said', 'NBIM', 'decade')
 
-**상태 (`$AEC_NEWS_STATE_DIR/state.json`, 기본 `/home/ubuntu/.local/state/aec-news`):** `sent`(언론사+정규화 제목 / Google ID / 정규화 원문 URL — 하나라도 같으면 이미 보낸 기사, 45일), `judged`(Bedrock 탈락 기사, 10일 동안 재판정 안 함), `decoded`(원문 URL 캐시, 30일), `last_success`. **Google은 같은 기사에 ID를 둘 이상 준다**(AMP 사본 등) — Google ID만으로 중복을 판단하지 말 것. 전송 이력은 **Slack 전송 성공 후에만** 저장하고(실패하면 다음 실행에서 다시 보낸다), `last_success`는 검색이 하나도 실패하지 않은 실행에서만 갱신한다.
+**상태 (`$AEC_NEWS_STATE_DIR/state.json`, 기본 `/home/ubuntu/.local/state/aec-news`):** `sent`(언론사+정규화 제목 / Google ID / 정규화 원문 URL — 하나라도 같으면 이미 보낸 기사, 45일), `judged`(Bedrock 탈락 기사, 10일 동안 재판정 안 함), `decoded`(원문 URL 캐시, 30일), `recent`(보낸 기사 제목, 5일 — 재탕 판정용), `last_success`. **Google은 같은 기사에 ID를 둘 이상 준다**(AMP 사본 등) — Google ID만으로 중복을 판단하지 말 것. 전송 이력은 **Slack 전송 성공 후에만** 저장하고(실패하면 다음 실행에서 다시 보낸다), `last_success`는 검색이 하나도 실패하지 않은 실행에서만 갱신한다.
 
 **재시작은 Slack에 아무것도 보내지 않는다** (`AEC_NEWS_RUN_ON_START=0` 기본 — ai-news와 다름). 새 기사가 없는 날에도 `새 소식 없음` 메시지는 보낸다 (조용히 고장나는 것 방지).
 
@@ -166,7 +179,7 @@ HTML 스크래핑보다 RSS가 안정적이다. 실제로 세 소스가 조용�
   - 목록에 마감일이 없는 소스(MSIT/MOTIE/NIA 등)는 저장된 마감일(처음 분석 때 첨부에서 추출)을 마감일 필터 전에 복원한다 — 복원하지 않으면 재저장 때 마감일이 지워져 리마인더가 나가지 않는다
   - 마감 리마인더(D-7, D-3)는 오늘 수집된 저장 공고 + 수집 범위 밖으로 밀려난 저장 공고(저장된 마감일 기준) 대상
 - **ai-news**: crawl → deduplicate → vector_key 비교(신규 식별) → bedrock_summarize → vector storage → slack notify
-- **aec-news**: Google News 검색(주제 × 국가 × 언론사 묶음) → 언론사 호스트/게시 시각/제목 언어 필터 → 실행 내 중복 제거 → 전송 이력·탈락 캐시 제외 → Bedrock 판정(ai_tech/ai_infra/irrelevant) → **통과 기사만** 원문 URL 복원 → 한 줄 요약 + 같은 소식 묶기 → Slack → **전송 성공 후** 이력 저장 (아래 'aec-news' 절)
+- **aec-news**: Google News 검색(주제 × 섹션 × 지역판 × 언론사 묶음 + 경쟁사) → 언론사 호스트/게시 시각/제목 언어 필터 → 실행 내 중복 제거 → 전송 이력·탈락 캐시 제외 → 경쟁사 후보 본문 확인·Bedrock 경쟁사 확인 → 나머지 Bedrock 주제 판정(ai_tech/ai_infra/irrelevant) → 한 줄 요약 + 같은 소식 묶기 + 이미 보낸 소식 제거 → **보낼 기사만** 원문 URL 복원 → Slack → **전송된 메시지의 기사만** 이력 저장 (위 'aec-news' 절)
 
 ### Data Models
 
@@ -351,8 +364,9 @@ slack-bots/
 │   │   ├── storage/          # models, vector_storage
 │   │   └── utils/            # config, logger
 │   ├── aec_news/             # EPC·AEC × AI 뉴스 링크 정리 (Google News RSS → Bedrock 판정 → Slack)
-│   │   ├── config.py         # 언론사 24곳(keep_hosts), 검색어, 환경변수
-│   │   ├── google_news.py    # 쿼리 묶기(≤190자), 검색/필터, 원문 URL 복원, 차단 감지
+│   │   ├── config.py         # 언론사 40곳(keep_hosts, 지역판), 검색어, 경쟁사 22곳, 환경변수
+│   │   ├── google_news.py    # 쿼리 묶기(≤190자), 검색/필터, 경쟁사 이름 태깅, 원문 URL 복원, 차단 감지
+│   │   ├── article_text.py   # 원문 본문 추출(경쟁사 본문 언급 확인)
 │   │   ├── relevance.py      # Bedrock 판정·요약, 키워드 폴백
 │   │   ├── slack_notifier.py # 국가별 섹션, 같은 소식 묶기, 블록 한도 분할
 │   │   └── state.py          # 전송 이력, 탈락 캐시, URL 캐시
@@ -400,12 +414,16 @@ slack-bots/
 | `AEC_NEWS_MODEL_ID` | aec-news 판정/요약 모델 | `BEDROCK_MODEL_ID` |
 | `AEC_NEWS_RELEVANCE_THRESHOLD` | 본문에 넣을 ai_tech 점수 하한 | `0.6` |
 | `AEC_NEWS_INCLUDE_INFRA` / `AEC_NEWS_MAX_INFRA` | 📎 참고(AI 인프라 EPC) 섹션 표시 / 최대 건수 | `1` / `8` |
-| `AEC_NEWS_KR_DAYS` / `AEC_NEWS_INTL_DAYS` | 검색 기간(일) 국내 / 미국·싱가포르 | `2` / `7` |
+| `AEC_NEWS_KR_DAYS` / `AEC_NEWS_INTL_DAYS` | 검색 기간(일) 국내 / 미국·싱가포르·글로벌 | `2` / `7` |
 | `AEC_NEWS_HOUR` / `AEC_NEWS_MINUTE` | 실행 시각 (KST) | `8` / `30` |
 | `AEC_NEWS_RUN_ON_START` | 서비스 시작 시 1회 실행 (Slack 전송) | `0` |
 | `AEC_NEWS_REQUEST_INTERVAL` | Google News 요청 간격(초, +0~1초 지터) | `3.0` |
 | `AEC_NEWS_MAX_DECODES` | 실행당 원문 URL 복원 상한 | `30` |
 | `AEC_NEWS_STATE_DIR` | 상태 파일 디렉토리 | `/home/ubuntu/.local/state/aec-news` |
+| `AEC_NEWS_COMPETITORS` | 🏁 경쟁사 섹션 (0이면 경쟁사 검색 안 함) | `1` |
+| `AEC_NEWS_COMPETITOR_DAYS` / `AEC_NEWS_MAX_COMPETITOR` | 경쟁사 검색 기간(일) / 실행당 최대 소식 수(같은 소식 묶음 단위) | `7` / `15` |
+| `AEC_NEWS_COMPETITOR_THRESHOLD` | 경쟁사 기사로 인정할 점수 하한 (0.5 = 본문에서 활동과 함께 언급) | `0.5` |
+| `AEC_NEWS_MAX_BODY_CHECKS` | 실행당 원문 본문 확인 상한 (원문 URL 복원에 Google 요청 2회씩) | `15` |
 | `CLAUDE_CODE_USE_BEDROCK` | Claude Code Bedrock 사용 | `1` |
 | `AWS_BEARER_TOKEN_BEDROCK` | Bedrock Bearer Token — 설정하지 않음 (Claude CLI가 EC2 IAM Role 사용, 위 "Claude CLI 인증" 참고) | (미설정) |
 | `ANTHROPIC_API_PROVIDER` | API 프로바이더 | `bedrock` |

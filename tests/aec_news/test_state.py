@@ -68,3 +68,15 @@ def test_naive_timestamps_are_treated_as_utc(tmp_path):
     path.write_text(json.dumps({"last_success": "2026-11-12T00:00:00"}), encoding="utf-8")
     state = RunState(str(path)).load()
     assert state.last_success == datetime(2026, 11, 12, tzinfo=timezone.utc)
+
+
+def test_recent_titles_roundtrip_and_expiry(tmp_path):
+    from src.aec_news.state import RECENT_KEEP_DAYS
+    path = tmp_path / "state.json"
+    state = RunState(str(path)).load()
+    now = datetime.now(timezone.utc)
+    state.add_recent("오래된 기사", "동아일보", "KR", "11/01", now - timedelta(days=RECENT_KEEP_DAYS + 1))
+    state.add_recent("최근 기사", "매일경제", "KR", "11/12", now)
+    state.save()
+    loaded = RunState(str(path)).load()
+    assert [r["title"] for r in loaded.recent_titles(now)] == ["최근 기사"]

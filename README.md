@@ -78,10 +78,10 @@ Claude CLI로 Notion Kanban 확인, Gmail 요약/초안 작성, Slack 보고를 
 
 ### 5. aec-news — EPC·AEC × AI 뉴스 링크 정리
 
-국내 10·미국 10·싱가포르 4개 주요 언론사에서 EPC & AI, AEC & AI, EPC & RAG, AEC & RAG, AI와 도면/BIM 기사를 찾아 링크를 국가별로 정리해 `#searchdoc-global-news`에 보낸다.
+국내 10개·해외 30개(글로벌 뉴스 사이트 순위 기반, 미국 14·싱가포르 4·글로벌 12) 언론사에서 EPC & AI, AEC & AI, EPC & RAG, AEC & RAG, AI와 도면/BIM 기사를 찾고, 경쟁사 22곳의 새 소식을 함께 모아 `#searchdoc-global-news`에 보낸다.
 
-- **검색**: Google News RSS (`intitle:` 검색어 + `site:` 언론사 묶음, 쿼리 190자 이하) → 언론사 호스트·게시 시각 필터
-- **워크플로우**: 검색 → 중복/전송 이력 제외 → Bedrock 관련성 판정 → 원문 URL 복원 → 한 줄 요약·같은 소식 묶기 → Slack 알림
+- **검색**: Google News RSS (`intitle:` 검색어 + `site:` 언론사 묶음, 쿼리 190자 이하, 언론사별 지역판) + 경쟁사 이름 검색(언론사 제한 없음)
+- **워크플로우**: 검색 → 중복/전송 이력 제외 → 경쟁사 본문 확인·Bedrock 경쟁사 확인 → Bedrock 주제 판정 → 한 줄 요약·같은 소식 묶기·이미 보낸 소식 제거 → 원문 URL 복원 → Slack 알림
 - 스케줄: 매일 8:30 KST (재시작 시 실행하지 않음)
 - venv: `/home/ubuntu/venvs/aec-news`
 

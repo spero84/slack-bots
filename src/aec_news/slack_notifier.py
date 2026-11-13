@@ -15,12 +15,13 @@ from typing import Callable, Optional
 
 import requests
 
-from .config import KST, OUTLETS, get_config
+from .config import COMPETITOR_GROUPS, COMPETITORS, KST, OUTLETS, get_config
 from .logger import logger
 from .models import REGION_LABELS, THEME_LABELS, NewsItem, Region
 
 MAX_BLOCKS = 48           # Slack 한도 50에서 여유
 MAX_SECTION_CHARS = 2900  # section text 한도 3000
+MAX_SAME_STORY_LINKS = 5  # 보도자료는 매체 10~18곳에 동시에 실린다 — 나머지는 '외 N곳'
 WEEKDAYS = "월화수목금토일"
 
 
@@ -32,6 +33,7 @@ class DigestContext:
     hours: Optional[float] = None       # --hours로 기간을 직접 지정한 경우
     candidates: int = 0                 # AI 판정에 넘긴 후보 수
     warnings: list[str] = field(default_factory=list)
+    repeats_skipped: int = 0            # 이미 보낸 소식의 다른 매체 기사라 뺀 수
 
     def period_text(self) -> str:
         if self.hours is not None:
@@ -94,13 +96,18 @@ def _story_block(group: StoryGroup) -> dict:
     lead = group.lead
     lines = [f"• *{slack_link(lead.link, lead.title)}*"]
     meta = [escape_mrkdwn(lead.outlet_name), _fmt_day(lead.published_at)]
-    if lead.theme is not None:
+    if lead.competitor:
+        comp = _COMPETITOR_BY_KEY.get(lead.competitor)
+        meta.insert(0, f"🏷 {escape_mrkdwn(comp.name if comp else lead.competitor)}")
+        if lead.mention == "body":
+            meta.append("본문 언급")
+    elif lead.theme is not None:
         meta.append(THEME_LABELS[lead.theme])
     lines.append("      " + " · ".join(meta))
     if lead.summary_ko:
         lines.append(f"      _{escape_mrkdwn(lead.summary_ko)}_")
     base = "\n".join(lines)
-    others = list(group.others)
+    others = list(group.others)[:MAX_SAME_STORY_LINKS]
     while others:
         links = " · ".join(slack_link(o.link, o.outlet_name) for o in others)
         dropped = len(group.others) - len(others)
@@ -133,9 +140,31 @@ def _infra_blocks(items: list[NewsItem]) -> list[tuple[dict, list[NewsItem]]]:
     return out
 
 
+_COMPETITOR_BY_KEY = {c.key: c for c in COMPETITORS}
+
+
 def outlet_scope_text() -> str:
     counts = {r: sum(1 for o in OUTLETS.values() if o.region == r) for r in Region}
     return " · ".join(f"{REGION_LABELS[r].split()[1]} {n}개" for r, n in counts.items() if n)
+
+
+def _competitor_body(items: list[NewsItem]) -> list[tuple[dict, list[NewsItem]]]:
+    """🏁 경쟁사 동향: 그룹(건설 스타트업 국내/글로벌, RAG 국내)별 소제목 + 소식"""
+    body: list[tuple[dict, list[NewsItem]]] = []
+    by_group: dict[str, list[NewsItem]] = {}
+    for item in items:
+        comp = _COMPETITOR_BY_KEY.get(item.competitor or "")
+        by_group.setdefault(comp.group if comp else "", []).append(item)
+    group_order = list(COMPETITOR_GROUPS) + [g for g in by_group if g not in COMPETITOR_GROUPS]
+    stories = {g: group_stories(by_group[g]) for g in group_order if by_group.get(g)}
+    total = sum(len(v) for v in stories.values())
+    body.append(({"type": "divider"}, []))
+    body.append(({**_section(f"*🏁 경쟁사 동향* ({total}건)"), "_label": True}, []))
+    for g, groups in stories.items():
+        label = COMPETITOR_GROUPS.get(g, "기타")
+        body.append(({"type": "context", "elements": [{"type": "mrkdwn", "text": f"*{label}*"}], "_label": True}, []))
+        body.extend((_story_block(st), [st.lead, *st.others]) for st in groups)
+    return body
 
 
 @dataclass
@@ -188,33 +217,47 @@ def build_messages(
     main_items: list[NewsItem],
     infra_items: list[NewsItem],
     ctx: DigestContext,
+    competitors: Optional[list[NewsItem]] = None,
 ) -> list[SlackMessage]:
-    """Slack 메시지 목록 — 첫 메시지가 본문, 나머지는 스레드 답글"""
+    """Slack 메시지 목록 — 첫 메시지가 본문, 나머지는 스레드 답글
+
+    순서: 🏁 경쟁사 동향 → 국가별 주제 기사 → 📎 참고
+    """
+    competitors = competitors or []
     groups_by_region = {r: group_stories([i for i in main_items if i.region == r]) for r in Region}
     story_count = sum(len(g) for g in groups_by_region.values())
     article_count = len(main_items)
+    comp_body = _competitor_body(competitors) if competitors else []
+    comp_count = len(group_stories(competitors)) if competitors else 0
 
     title = f"📰 EPC·AEC × AI 뉴스 — {_fmt_day(ctx.run_at)}"
+    lines = []
+    if comp_count:
+        lines.append(f"*🏁 경쟁사 소식 {comp_count}건*")
     if story_count:
         per_region = " · ".join(
             f"{REGION_LABELS[r]} {len(g)}" for r, g in groups_by_region.items() if g
         )
-        summary = f"*새 소식 {story_count}건* (기사 {article_count}개) — {per_region}"
+        lines.append(f"*새 소식 {story_count}건* (기사 {article_count}개) — {per_region}")
+    elif comp_count:
+        lines.append("주제 기사: 새 소식 없음")
     else:
-        summary = "*새 소식 없음* — 검색 범위에서 주제에 맞는 새 기사를 찾지 못했습니다."
+        lines.append("*새 소식 없음* — 검색 범위에서 주제에 맞는 새 기사를 찾지 못했습니다.")
     if infra_items:
-        summary += f"\n📎 참고(AI 인프라 EPC/건설) {len(infra_items)}건"
+        lines.append(f"📎 참고(AI 인프라 EPC/건설) {len(infra_items)}건")
+    summary = "\n".join(lines)
 
     header = [
         {"type": "header", "text": {"type": "plain_text", "text": title, "emoji": True}},
         _section(summary),
         {"type": "context", "elements": [{"type": "mrkdwn", "text": (
-            f"검색 기간 {ctx.period_text()} · 언론사 {outlet_scope_text()} · "
-            "키워드 EPC·AEC × AI/RAG, AI × 도면·BIM"
+            f"검색 기간 {ctx.period_text()} · 언론사 {outlet_scope_text()}"
+            + (f" · 경쟁사 {len(COMPETITORS)}곳" if COMPETITORS else "")
+            + " · 키워드 EPC·AEC × AI/RAG, AI × 도면·BIM"
         )}]},
     ]
 
-    body: list[tuple[dict, list[NewsItem]]] = []
+    body: list[tuple[dict, list[NewsItem]]] = list(comp_body)
     for region, groups in groups_by_region.items():
         if not groups:
             continue
@@ -230,11 +273,15 @@ def build_messages(
             {"type": "mrkdwn", "text": f"{' · '.join(empty)}: 새 기사 없음"}]}, []))
 
     footer: list[dict] = []
+    if ctx.repeats_skipped:
+        footer.append({"type": "context", "elements": [{"type": "mrkdwn", "text": (
+            f"ℹ️ 이미 보냈거나 위 경쟁사 섹션과 같은 소식을 다른 매체가 쓴 기사 {ctx.repeats_skipped}건은 뺐습니다")}]})
     if ctx.warnings:
         warn_text = "\n".join(f"⚠️ {escape_mrkdwn(w)}" for w in ctx.warnings)[:MAX_SECTION_CHARS]
         footer.append({"type": "context", "elements": [{"type": "mrkdwn", "text": warn_text}]})
 
-    fallback = f"EPC·AEC × AI 뉴스 {_fmt_day(ctx.run_at)} — 새 소식 {story_count}건"
+    fallback = f"EPC·AEC × AI 뉴스 {_fmt_day(ctx.run_at)} — 새 소식 {story_count}건" + (
+        f" · 경쟁사 {comp_count}건" if comp_count else "")
     return _pack(header, body, footer, fallback)
 
 

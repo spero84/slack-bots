@@ -174,3 +174,104 @@ def test_prompt_contains_region_outlet_and_snippet():
     prompt = rel.build_triage_prompt([item])
     assert "[1] (KR) 동아일보 | 2026-11-12 | AI가 도면을 읽는다" in prompt
     assert "스니펫: 인포시즈와 서울대가 공동 개발" in prompt
+
+
+# --- 경쟁사 확인 ---
+
+from src.aec_news.config import COMPETITORS  # noqa: E402
+
+
+def comp_candidate(no, title, hits, excerpt=""):
+    item = make_item(no, title=title)
+    item.competitor_hits = list(hits)
+    item.excerpt = excerpt
+    return item
+
+
+def test_competitor_schema_enum_and_prompt():
+    a = comp_candidate(1, "아이디어정보기술 파트너스 데이", ["fobecon"], excerpt="페이컴스, 포비콘, 제호바 등 협력사")
+    client = FakeBedrock(text_response({"items": [{"no": 1, "company": "fobecon", "score": 0.5}]}))
+    out = rel.verify_competitors([a], COMPETITORS, threshold=0.5, client=client)
+    body = client.bodies[0]
+    enum = body["output_config"]["format"]["schema"]["properties"]["items"]["items"]["properties"]["company"]["enum"]
+    assert enum[-1] == "none" and "fobecon" in enum and len(enum) == len(COMPETITORS) + 1
+    prompt = body["messages"][0]["content"]
+    assert "본문 발췌(제목에는 이름 없음): 페이컴스, 포비콘" in prompt
+    assert "후보 회사: fobecon" in prompt
+    assert "Searchdoc(서치독) 자체 소식이면" in prompt
+    assert out.matched == [a] and a.competitor == "fobecon"
+
+
+def test_competitor_none_and_low_score_rejected_missing_retried():
+    a = comp_candidate(1, "Viktor Orbán says", ["viktor"])
+    b = comp_candidate(2, "Egnyte passing mention", ["egnyte"])
+    c = comp_candidate(3, "Trunk Tools raises $40M", ["trunktools"])
+    client = FakeBedrock(
+        text_response({"items": [{"no": 1, "company": "none", "score": 0.0},
+                                 {"no": 2, "company": "egnyte", "score": 0.3}]}),
+        text_response({"items": [{"no": 1, "company": "trunktools", "score": 0.95}]}),
+    )
+    out = rel.verify_competitors([a, b, c], COMPETITORS, threshold=0.5, client=client)
+    assert out.rejected == [a, b]
+    assert out.matched == [c] and c.competitor == "trunktools"
+    assert not out.unjudged and not out.warnings
+
+
+def test_competitor_failure_falls_back_to_distinctive_title_names():
+    a = comp_candidate(1, "인포시즈, 한전과 전력망 AI 공개", ["infocz"])
+    b = comp_candidate(2, "New provision rules for builders", ["provision"])   # 일반어 이름은 규칙으로 판정하지 않는다
+    out = rel.verify_competitors([a, b], COMPETITORS, client=FakeBedrock(RuntimeError("down")))
+    assert out.matched == [a] and out.unjudged == [b]
+    assert out.warnings and not out.llm_ok
+
+
+def test_summarize_reports_already_sent_only_with_recent():
+    a, b = make_item(1, score=0.9), make_item(2, score=0.8)
+    client = FakeBedrock(text_response({"items": [
+        {"no": 1, "summary": "A", "same_story_as": 1, "already_sent": True},
+        {"no": 2, "summary": "B", "same_story_as": 2, "already_sent": False},
+    ]}))
+    repeats = []
+    recent = [{"title": "옛 기사", "outlet": "동아일보", "region": "KR", "day": "11/12"}]
+    rel.summarize([a, b], client=client, recent=recent, repeats=repeats)
+    assert repeats == [a]
+    assert "(KR) 동아일보 | 11/12 | 옛 기사" in client.bodies[0]["messages"][0]["content"]
+    # recent가 없으면 already_sent를 믿지 않는다
+    client2 = FakeBedrock(text_response({"items": [{"no": 1, "summary": "A", "same_story_as": 1, "already_sent": True}]}))
+    repeats2 = []
+    rel.summarize([make_item(3, score=0.9)], client=client2, recent=[], repeats=repeats2)
+    assert repeats2 == []
+
+
+def test_competitor_summary_groups_across_regions_but_not_across_companies():
+    bw = make_item(1, score=1.0, region=Region.GLOBAL, outlet_key="web:www.businesswire.com", outlet_name="Business Wire")
+    forbes = make_item(2, score=0.9, region=Region.US, outlet_key="forbes", outlet_name="Forbes")
+    other = make_item(3, score=0.8)
+    bw.competitor = forbes.competitor = "beamai"
+    other.competitor = "planby"
+    client = FakeBedrock(text_response({"items": [
+        {"no": 1, "summary": "A", "same_story_as": 1, "already_sent": False},
+        {"no": 2, "summary": "A", "same_story_as": 1, "already_sent": False},   # 국가 달라도 같은 회사 → 묶음
+        {"no": 3, "summary": "B", "same_story_as": 1, "already_sent": False},   # 다른 회사 → 단독
+    ]}))
+    rel.summarize([bw, forbes, other], client=client, same_competitor=True)
+    assert (bw.story, forbes.story, other.story) == (1, 1, 3)
+    prompt = client.bodies[0]["messages"][0]["content"]
+    assert "경쟁사가 다르면 묶지 않는다" in prompt and "경쟁사: Beam AI (Attentive.ai)" in prompt
+
+
+def test_topic_summary_still_requires_same_region():
+    kr, us = make_item(1, score=0.9), make_item(2, score=0.8, region=Region.US)
+    client = FakeBedrock(text_response({"items": [
+        {"no": 1, "summary": "A", "same_story_as": 1, "already_sent": False},
+        {"no": 2, "summary": "A", "same_story_as": 1, "already_sent": False},
+    ]}))
+    rel.summarize([kr, us], client=client)
+    assert (kr.story, us.story) == (1, 2)
+    assert "KR/US/SG/GLOBAL" in client.bodies[0]["messages"][0]["content"]
+
+
+def test_primepoint_is_never_attributed_by_title_rule():
+    item = comp_candidate(1, "PrimePoint launches payroll compliance tool for construction contractors", ["primepoint"])
+    out = rel.verify_competitors([item], COMPETITORS, client=FakeBedrock(RuntimeError("down")))
+    assert out.matched == [] and out.unjudged == [item]

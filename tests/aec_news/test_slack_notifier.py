@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import requests
 
-from src.aec_news.config import KST
+from src.aec_news.config import COMPETITORS, KST
 from src.aec_news.models import Region, Theme
 from src.aec_news.slack_notifier import (
     MAX_BLOCKS,
@@ -211,3 +211,38 @@ def test_send_without_token_fails_fast():
     notifier = SlackNotifier(bot_token="", channel_id="")
     notifier.bot_token, notifier.channel_id = "", ""
     assert notifier.send([SlackMessage([], "a")]) == []
+
+
+def test_competitor_section_comes_first_with_company_and_mention():
+    comp = make_item(1, title="인포시즈, 서울대와 산업 도면 AI", score=0.9, story=1, summary="요약",
+                     url="https://www.aitimes.com/1")
+    comp.competitor, comp.mention = "infocz", "title"
+    body_only = make_item(2, title="아이디어정보기술 파트너스 데이", score=0.5, story=2, url="https://dnews.co.kr/2")
+    body_only.competitor, body_only.mention = "fobecon", "body"
+    glob = make_item(3, title="Trunk Tools raises $40M", score=0.95, story=3, region=Region.GLOBAL,
+                     outlet_key="web:www.businesswire.com", outlet_name="Business Wire")
+    glob.competitor = "trunktools"
+    main = make_item(4, title="주제 기사", score=0.8, story=4)
+    messages = build_messages([main], [], CTX, competitors=[comp, body_only, glob])
+    text = all_text(messages)
+    assert "🏁 경쟁사 소식 3건" in text
+    assert text.index("*🏁 경쟁사 동향*") < text.index("*🇰🇷 국내*")
+    assert text.index("건설 스타트업 국내") < text.index("건설 스타트업 글로벌")
+    assert "🏷 인포시즈 · 동아일보" in text
+    assert "🏷 포비콘 · 동아일보 · 11/12(목) · 본문 언급" in text
+    assert "🏷 Trunk Tools · Business Wire" in text
+    assert f"경쟁사 {len(COMPETITORS)}곳" in text
+    assert sorted(i.google_id for m_ in messages for i in m_.items) == sorted(
+        i.google_id for i in [comp, body_only, glob, main])
+
+
+def test_same_story_links_capped():
+    lead = make_item(1, score=0.9, story=1)
+    others = [make_item(i, score=0.5, story=1, outlet_name=f"매체{i}") for i in range(2, 12)]
+    text = all_text(build_messages([lead, *others], [], CTX))
+    assert "외 5곳" in text and "매체7" not in text
+
+
+def test_repeats_note_in_footer():
+    ctx = DigestContext(run_at=CTX.run_at, days_by_region=CTX.days_by_region, repeats_skipped=4)
+    assert "다른 매체가 쓴 기사 4건은 뺐습니다" in all_text(build_messages([], [], ctx))

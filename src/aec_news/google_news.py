@@ -31,13 +31,18 @@ import feedparser
 import requests
 
 from .config import (
+    COMPETITOR_BLOCK_HOSTS,
+    COMPETITOR_QUERIES,
+    COMPETITORS,
     DROP_PATH_PREFIXES,
-    HEALTH_TERMS,
+    DROP_PATH_SEGMENTS,
+    EDITIONS,
+    HEALTH_QUERIES,
     MAX_QUERY_CHARS,
     OUTLETS,
-    REGION_SEARCH,
     SEARCH_KIND_THEME,
     SEARCH_TERMS,
+    Competitor,
     Outlet,
     get_config,
 )
@@ -73,16 +78,17 @@ class GoogleThrottled(RuntimeError):
 
 @dataclass(frozen=True)
 class SearchQuery:
-    kind: str                    # drawing / aec_ai / rag / health
-    region: Region
+    kind: str                    # drawing / aec_ai / rag / health / competitor
+    region: Region               # 언론사 섹션 (경쟁사 검색은 지역판 기준 KR 또는 GLOBAL)
     q: str
-    outlet_keys: tuple[str, ...]
+    outlet_keys: tuple[str, ...]  # 경쟁사 검색은 (경쟁사 키,)
     days: int
+    edition: str = "en-US"       # config.EDITIONS 키
 
     @property
     def url(self) -> str:
-        rs = REGION_SEARCH[self.region]
-        return f"{SEARCH_URL}?{urlencode({'q': self.q, 'hl': rs.hl, 'gl': rs.gl, 'ceid': rs.ceid})}"
+        ed = EDITIONS[self.edition]
+        return f"{SEARCH_URL}?{urlencode({'q': self.q, 'hl': ed.hl, 'gl': ed.gl, 'ceid': ed.ceid})}"
 
 
 def _compose(terms: str, outlets: list[Outlet], days: int) -> str:
@@ -111,25 +117,49 @@ def pack_outlets(terms: str, outlets: list[Outlet], days: int, max_chars: int = 
 
 
 def build_queries(days_by_region: dict[Region, int]) -> list[SearchQuery]:
-    """주제 × 국가 × 언론사 묶음 쿼리 + 국가별 점검 쿼리"""
+    """주제 × 섹션 × 지역판 × 언론사 묶음 쿼리 + 섹션별 점검 쿼리
+
+    site: 묶음은 같은 지역판(edition)을 쓰는 언론사끼리만 만든다 (BBC는 en-GB, Times of India는 en-IN 등).
+    """
     queries: list[SearchQuery] = []
     for region, days in days_by_region.items():
         outlets = [o for o in OUTLETS.values() if o.region == region]
         if not outlets:
             continue
+        by_edition: dict[str, list[Outlet]] = {}
+        for outlet in outlets:
+            by_edition.setdefault(outlet.search_edition, []).append(outlet)
         for kind, terms_by_region in SEARCH_TERMS.items():
             terms = terms_by_region.get(region)
             if not terms:
                 continue
-            for group in pack_outlets(terms, outlets, days):
-                queries.append(SearchQuery(kind, region, _compose(terms, group, days),
-                                           tuple(o.key for o in group), days))
-        if region in HEALTH_TERMS:
-            terms, keys = HEALTH_TERMS[region]
-            group = [OUTLETS[k] for k in keys if k in OUTLETS]
-            if group:
-                queries.append(SearchQuery("health", region, _compose(terms, group, 1),
-                                           tuple(o.key for o in group), 1))
+            for edition, members in by_edition.items():
+                for group in pack_outlets(terms, members, days):
+                    queries.append(SearchQuery(kind, region, _compose(terms, group, days),
+                                               tuple(o.key for o in group), days, edition))
+    for region, terms, keys in HEALTH_QUERIES:
+        if region not in days_by_region:
+            continue
+        group = [OUTLETS[k] for k in keys if k in OUTLETS]
+        if not group:
+            continue
+        editions = {o.search_edition for o in group}
+        if len(editions) != 1:
+            raise ValueError(f"점검 쿼리 언론사는 지역판이 같아야 한다: {keys}")
+        queries.append(SearchQuery("health", region, _compose(terms, group, 1),
+                                   tuple(o.key for o in group), 1, editions.pop()))
+    return queries
+
+
+def build_competitor_queries(days: int, specs=COMPETITOR_QUERIES) -> list[SearchQuery]:
+    """경쟁사 검색 — 언론사 제한 없이 `{검색어} when:Nd`. outlet_keys = 후보 회사 키"""
+    queries: list[SearchQuery] = []
+    for terms, edition, keys in specs:
+        q = f"{terms} when:{days}d"
+        if len(q) > MAX_QUERY_CHARS:
+            raise ValueError(f"경쟁사 검색어가 너무 길다 ({len(q)}자): {q}")
+        region = Region.KR if edition == "ko" else Region.GLOBAL
+        queries.append(SearchQuery("competitor", region, q, tuple(keys), days, edition))
     return queries
 
 
@@ -289,13 +319,62 @@ def parse_batchexecute(body: str) -> Optional[str]:
 
 # --- 피드 파싱 + 1차 필터 ---
 
-def match_outlet(host: str, region: Region) -> Optional[Outlet]:
-    """<source url> 호스트 → 언론사. keep_hosts에 정확히 있는 호스트만 (하위 도메인·영문판은 None)."""
+def match_outlet(host: str, region: Optional[Region]) -> Optional[Outlet]:
+    """<source url> 호스트 → 언론사. keep_hosts에 정확히 있는 호스트만 (하위 도메인·영문판은 None).
+    region이 None이면 모든 섹션에서 찾는다 (경쟁사 검색)."""
     host = (host or "").lower()
     for outlet in OUTLETS.values():
-        if outlet.region == region and host in outlet.keep_hosts:
+        if (region is None or outlet.region == region) and host in outlet.keep_hosts:
             return outlet
     return None
+
+
+def is_outlet_noise_host(host: str) -> bool:
+    """목록 언론사 도메인의 하위 도메인인데 keep_hosts가 아닌 곳 (시세·포럼·광고·영문판 사본)"""
+    host = (host or "").lower()
+    for outlet in OUTLETS.values():
+        if host == outlet.domain or host.endswith("." + outlet.domain):
+            return host not in outlet.keep_hosts
+    return False
+
+
+def is_blocked_competitor_host(host: str) -> bool:
+    host = (host or "").lower()
+    return any(host == b or host.endswith("." + b) for b in COMPETITOR_BLOCK_HOSTS)
+
+
+_PATTERN_CACHE: dict[tuple, Optional[re.Pattern]] = {}
+
+
+def _alias_regex(parts: tuple[str, ...]) -> Optional[re.Pattern]:
+    """영문 이름은 영문·숫자 경계(한글 조사가 붙어도 매칭 — '올거나이즈의', 'BHSN과'), 대소문자 무시"""
+    if not parts:
+        return None
+    key = parts
+    if key not in _PATTERN_CACHE:
+        _PATTERN_CACHE[key] = re.compile(
+            "|".join(rf"(?<![A-Za-z0-9])(?:{p})(?![A-Za-z0-9])" for p in parts), re.IGNORECASE)
+    return _PATTERN_CACHE[key]
+
+
+def tag_pattern(comp: Competitor) -> Optional[re.Pattern]:
+    """주제 검색 기사 제목을 훑을 때 쓰는 고유 이름 정규식 (없으면 None — 그 회사는 경쟁사 검색으로만 찾는다)"""
+    return _alias_regex(comp.tag_aliases)
+
+
+def names_pattern(comp: Competitor) -> Optional[re.Pattern]:
+    """기사에 나오는 이름 표기 전체(리터럴) — 제목·본문에 회사명이 실제로 있는지 볼 때"""
+    return _alias_regex(tuple(re.escape(n) for n in comp.names))
+
+
+def tag_competitors(items: list[NewsItem], competitors: tuple[Competitor, ...] = COMPETITORS):
+    """제목·스니펫에 경쟁사의 고유 이름이 있으면 competitor_hits에 추가 (주제 검색으로 찾은 기사도 경쟁사 확인을 거친다)"""
+    for item in items:
+        text = f"{item.title} {item.snippet}"
+        for comp in competitors:
+            pat = tag_pattern(comp)
+            if pat is not None and comp.key not in item.competitor_hits and pat.search(text):
+                item.competitor_hits.append(comp.key)
 
 
 def clean_title(title: str, source_title: str = "") -> str:
@@ -364,30 +443,43 @@ def parse_feed(content: bytes, query: SearchQuery, window_start: datetime, now: 
             stat.stale += 1
         if query.kind == "health":
             continue
-        outlet = match_outlet(host, query.region)
-        if outlet is None:
-            continue
+        competitor_search = query.kind == "competitor"
+        source_title = (source.get("title") or "").strip()
+        if competitor_search:
+            # 경쟁사 소식은 업계지·보도자료에 많아 언론사 목록 밖도 받는다. 목록 언론사의 잡음 하위 도메인만 뺀다
+            outlet = match_outlet(host, None)
+            if outlet is None and (not host or is_outlet_noise_host(host) or is_blocked_competitor_host(host)):
+                continue
+            region = outlet.region if outlet else query.region
+            outlet_key = outlet.key if outlet else f"web:{host}"
+            outlet_name = outlet.name_for(host) if outlet else (source_title or host)
+        else:
+            outlet = match_outlet(host, query.region)
+            if outlet is None:
+                continue
+            region, outlet_key, outlet_name = query.region, outlet.key, outlet.name_for(host)
         if published is None or not (window_start <= published <= now + timedelta(hours=1)):
             continue
-        source_title = source.get("title") or ""
         title = clean_title(entry.get("title", ""), source_title)
         if _BAD_TITLE_RE.match(title):
             continue
-        has_hangul = bool(_HANGUL_RE.search(title))
-        if (query.region == Region.KR) != has_hangul:
-            continue   # 국내 검색의 영어 제목(영문판) / 해외 검색의 한글 제목은 버린다
+        if not competitor_search:
+            has_hangul = bool(_HANGUL_RE.search(title))
+            if (query.region == Region.KR) != has_hangul:
+                continue   # 국내 검색의 영어 제목(영문판) / 해외 검색의 한글 제목은 버린다
         google_id = entry.get("id") or article_id(entry.get("link", "")) or entry.get("link", "")
         items.append(NewsItem(
             title=title,
-            outlet_key=outlet.key,
-            outlet_name=outlet.name_for(host),
-            region=query.region,
+            outlet_key=outlet_key,
+            outlet_name=outlet_name,
+            region=region,
             published_at=published,
             google_id=google_id,
             google_url=entry.get("link", ""),
             host=host,
             snippet=_snippet(entry.get("description", ""), title, source_title),
             query_themes=[SEARCH_KIND_THEME[query.kind]] if query.kind in SEARCH_KIND_THEME else [],
+            competitor_hits=list(query.outlet_keys) if competitor_search else [],
         ))
     stat.kept = len(items)
     return items
@@ -422,13 +514,16 @@ def lookback_days(region: Region, last_success: Optional[datetime], now: datetim
 
 
 def search_all(now: datetime, days_by_region: dict[Region, int], hours: Optional[float] = None,
-               client: Optional[GoogleNewsClient] = None) -> SearchResult:
+               client: Optional[GoogleNewsClient] = None, competitor_days: Optional[int] = None) -> SearchResult:
     """모든 쿼리를 순서대로 실행. 쿼리 하나의 실패는 건너뛰고, 차단이면 나머지를 모두 건너뛴다.
 
     hours를 주면 모든 국가의 게시 시각 필터를 now - hours로 맞춘다 (when:은 올림한 일수).
+    competitor_days를 주면 경쟁사 검색도 한다. 끝에 모든 기사 제목에서 경쟁사 이름을 찾아 표시한다.
     """
     client = client or GoogleNewsClient()
     queries = build_queries(days_by_region)
+    if competitor_days is not None:
+        queries += build_competitor_queries(competitor_days)
     result = SearchResult(total=len(queries))
     health_zero: list[str] = []
     stale_queries: list[str] = []
@@ -474,6 +569,7 @@ def search_all(now: datetime, days_by_region: dict[Region, int], hours: Optional
         logger.warning(f"점검 쿼리 0건: {health_zero}")
     if stale_queries:
         result.warnings.append(f"검색 기간 조건이 무시된 쿼리 {len(stale_queries)}개 ({', '.join(stale_queries)})")
+    tag_competitors(result.items)
     logger.info(f"Google News 검색 {result.total}회 (실패 {result.failed}) · 요청 {client.requests}회 · 통과 {len(result.items)}건")
     return result
 
@@ -494,14 +590,17 @@ UNVERIFIED_PATH_RISK_OUTLETS = frozenset({"usatoday"})
 
 def is_non_article_path(url: str) -> bool:
     path = urlsplit(url).path or "/"
-    return path.startswith(DROP_PATH_PREFIXES)
+    if path.startswith(DROP_PATH_PREFIXES):
+        return True
+    return any(seg.lower() in DROP_PATH_SEGMENTS for seg in path.split("/"))
 
 
 def resolve_urls(items: list[NewsItem], cache: dict[str, str], client: Optional[GoogleNewsClient] = None,
-                 max_decodes: Optional[int] = None) -> tuple[list[NewsItem], list[str]]:
+                 max_decodes: Optional[int] = None, competitor_mode: bool = False) -> tuple[list[NewsItem], list[str]]:
     """원문 URL을 채운다. 반환: (남길 기사, 경고). 기사 아닌 경로(회사 프로필 등)는 뺀다.
 
     cache: Google ID → 원문 URL (상태 파일에 저장). 차단되면 나머지는 Google 링크로 남긴다.
+    competitor_mode(또는 item.competitor): 경쟁사 기사 — 보도자료 경로도 받는다 (투자·출시 소식이 보도자료로 나온다).
     """
     client = client or GoogleNewsClient()
     limit = get_config().max_decodes if max_decodes is None else max_decodes
@@ -523,7 +622,8 @@ def resolve_urls(items: list[NewsItem], cache: dict[str, str], client: Optional[
                 cache[item.google_id] = url
             else:
                 failed += 1
-        if url is None and not checked and item.outlet_key in UNVERIFIED_PATH_RISK_OUTLETS:
+        is_comp = competitor_mode or bool(item.competitor)
+        if url is None and not checked and item.outlet_key in UNVERIFIED_PATH_RISK_OUTLETS and not is_comp:
             # 차단·상한으로 원문 경로를 못 봤다 — 보도자료일 수 있어 보내지 않고 다음 실행으로 미룬다
             # (전송 이력·탈락 캐시에 남기지 않으므로 다음 실행에서 다시 판정·복원된다)
             deferred += 1
@@ -536,11 +636,13 @@ def resolve_urls(items: list[NewsItem], cache: dict[str, str], client: Optional[
             if outlet is not None and host not in outlet.keep_hosts:
                 logger.info(f"원문 호스트가 언론사 목록 밖 ({host}) — 제외: {item.title}")
                 continue
-            if is_non_article_path(url):
+            if is_non_article_path(url) and not (is_comp and "/press-release" in url):
                 logger.info(f"기사 아닌 경로 — 제외: {url}")
                 continue
-            if item.outlet_key == "forbes" and "/councils/" in url:
+            if item.outlet_key == "forbes" and "/councils/" in url and "기고" not in item.outlet_name:
                 item.outlet_name = "Forbes (Councils 기고)"
+            if "/spons/" in url and "스폰서" not in item.outlet_name:
+                item.outlet_name = f"{item.outlet_name} (스폰서 콘텐츠)"   # Construction Dive 등: 회사가 쓴 광고 기사
             item.url = url
         kept.append(item)
     if attempted or deferred:
