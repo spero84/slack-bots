@@ -10,7 +10,7 @@ Slack 기반 업무 자동화 시스템 (정부 지원사업 모니터링, AI �
 | scheduler | `src.scheduler.scheduler` | `/home/ubuntu/venvs/scheduler` | 평일 9,13,17시 |
 | gov-funding | `src.gov_funding.main` | `/home/ubuntu/venvs/gov-funding` | 매일 9시 |
 | ai-news | `src.ai_news.main` | `/home/ubuntu/venvs/ai-news` | 월/수/금 8시 |
-| aec-news | `src.aec_news.main` | `/home/ubuntu/venvs/aec-news` | 매일 8:00 수집 시작 · 8:30 게시 |
+| aec-news | `src.aec_news.main` | `/home/ubuntu/venvs/aec-news` | 매일 7:30 수집 시작 · 8:30 게시 |
 
 Python 가상환경은 프로젝트 외부 `/home/ubuntu/venvs/` 디렉토리에 서비스별로 분리되어 있다. `scripts/setup-venvs.sh`로 uv를 사용하여 생성한다.
 
@@ -169,7 +169,7 @@ HTML 스크래핑보다 RSS가 안정적이다. 실제로 세 소스가 조용�
 
 **원문 URL 복원:** RSS 링크(`news.google.com/rss/articles/CBMi...`)는 JS 리다이렉트라 따라가도 원문에 닿지 않고, 옛 base64 디코딩은 지금 ID(`AU_yqL...`)에 통하지 않는다. `GET /rss/articles/{id}` 페이지의 `data-n-a-sg`/`data-n-a-ts` 서명으로 `batchexecute`(rpc `Fbv4je`)를 POST해 받는다 (index 1 = 정식 URL, index 3 = AMP). **`/read/{id}` 경로는 실측 중 429(google.com/sorry)를 받았으니 쓰지 않는다.** 비공개 API라 실패하면 Google News 링크를 그대로 보낸다. 요청 2회가 들어 Bedrock 통과 기사만(최대 `AEC_NEWS_MAX_DECODES`=30) 복원하고 결과는 상태 파일에 30일 캐시한다.
 
-**요청 제한 — 사람이 브라우저로 보는 속도 (2026-11-13 사용자 요청 "캡차에 걸리지 않도록 사람처럼, 타이밍도"):** news.google.com 요청은 전부 순차로, 요청 사이 무작위 4~9초(`AEC_NEWS_GAP_MIN/MAX` — 일정한 간격은 자동화로 보인다), 12~20회마다 25~60초 '읽는 시간' 휴식. 기사 링크를 열 때(원문 URL 복원)는 페이지 GET 뒤 0.6~1.6초 있다가 POST(브라우저 스크립트가 도는 시간). 쿼리 순서는 실행마다 섞는다. 헤더는 한 실행 동안 바꾸지 않는 같은 Chrome 헤더 + 지역판별 Accept-Language(한국어판 ko-KR, 영어판 en-US/GB/IN/SG), Google 쿠키는 `$AEC_NEWS_STATE_DIR/google_cookies.txt`에 두고 실행 사이에 유지한다(돌아온 브라우저처럼). 네트워크 오류·5xx(503 제외)는 10초·30초 뒤 두 번 재시도. **429/503/google.com/sorry/동의 페이지를 받으면 그 실행의 Google 호출(검색·복원)을 모두 멈추고** 받은 결과로 보내며 `⚠️ Google News 차단 감지`를 표시한다 — 캡차를 풀거나 IP를 바꾸는 우회는 하지 않는다. 이 속도로 한 실행이 25~30분 걸려 **08:00에 수집을 시작하고(`AEC_NEWS_LEAD_MINUTES`=30), 일찍 끝나면 08:30까지 기다렸다가 게시**한다(`scheduled_post_time` — 늦게 시작하면 바로 게시, 다음 날로 넘기지 않는다). `--once`·`--dry-run`은 기다리지 않는다. 점검 쿼리(`HEALTH_QUERIES`) 결과가 0건이면 `점검 검색 결과 0건` 경고 — 주제 쿼리는 실제로 0건인 날이 많아 0건 경고를 하지 않는다.
+**요청 제한 — 사람이 브라우저로 보는 속도 (2026-11-13 사용자 요청 "캡차에 걸리지 않도록 사람처럼, 타이밍도"):** news.google.com 요청은 전부 순차로, 요청 사이 무작위 4~9초(`AEC_NEWS_GAP_MIN/MAX` — 일정한 간격은 자동화로 보인다), 12~20회마다 25~60초 '읽는 시간' 휴식. 기사 링크를 열 때(원문 URL 복원)는 페이지 GET 뒤 0.6~1.6초 있다가 POST(브라우저 스크립트가 도는 시간). 쿼리 순서는 실행마다 섞는다. 헤더는 한 실행 동안 바꾸지 않는 같은 Chrome 헤더 + 지역판별 Accept-Language(한국어판 ko-KR, 영어판 en-US/GB/IN/SG), Google 쿠키는 `$AEC_NEWS_STATE_DIR/google_cookies.txt`에 두고 실행 사이에 유지한다(돌아온 브라우저처럼). 네트워크 오류·5xx(503 제외)는 10초·30초 뒤 두 번 재시도. **429/503/google.com/sorry/동의 페이지를 받으면 그 실행의 Google 호출(검색·복원)을 모두 멈추고** 받은 결과로 보내며 `⚠️ Google News 차단 감지`를 표시한다 — 캡차를 풀거나 IP를 바꾸는 우회는 하지 않는다. 이 속도로 한 실행이 25~30분 걸려 **07:30에 수집을 시작하고(`AEC_NEWS_LEAD_MINUTES`=60, 사용자 요청), 일찍 끝나면 08:30까지 기다렸다가 게시**한다(`scheduled_post_time` — 늦게 시작하면 바로 게시, 다음 날로 넘기지 않는다). `--once`·`--dry-run`은 기다리지 않는다. 점검 쿼리(`HEALTH_QUERIES`) 결과가 0건이면 `점검 검색 결과 0건` 경고 — 주제 쿼리는 실제로 0건인 날이 많아 0건 경고를 하지 않는다.
 
 **Bedrock 판정 (`relevance.py`, Sonnet 5, thinking off, structured outputs):**
 - triage(60건 배치): `ai_tech`(AI를 EPC·건설·도면·BIM 업무에 적용) / `ai_infra`(건설사의 AI 데이터센터·전력 인프라 수주 — AI가 발주 수요일 뿐) / `irrelevant`(동음이의어: EPC Power, 유럽정치공동체, 전자제품코드, 'AEC' 케이블 등). `ai_tech`이고 score ≥ `AEC_NEWS_RELEVANCE_THRESHOLD`(0.6)면 본문, `ai_infra`는 `📎 참고` 섹션(최신 8건, `AEC_NEWS_INCLUDE_INFRA=0`이면 숨김)
@@ -428,7 +428,7 @@ slack-bots/
 | `AEC_NEWS_HOUR` / `AEC_NEWS_MINUTE` | 게시 시각 (KST, 수집은 LEAD_MINUTES 먼저 시작) | `8` / `30` |
 | `AEC_NEWS_RUN_ON_START` | 서비스 시작 시 1회 실행 (Slack 전송) | `0` |
 | `AEC_NEWS_GAP_MIN` / `AEC_NEWS_GAP_MAX` | Google News 요청 간격(초, 무작위) — 12~20회마다 25~60초 휴식 | `4` / `9` |
-| `AEC_NEWS_LEAD_MINUTES` | 게시 시각보다 몇 분 먼저 수집을 시작할지 | `30` |
+| `AEC_NEWS_LEAD_MINUTES` | 게시 시각보다 몇 분 먼저 수집을 시작할지 (07:30 시작) | `60` |
 | `AEC_NEWS_MAX_DECODES` | 실행당 원문 URL 복원 상한 | `30` |
 | `AEC_NEWS_STATE_DIR` | 상태 파일 디렉토리 | `/home/ubuntu/.local/state/aec-news` |
 | `AEC_NEWS_COMPETITORS` | 🏁 경쟁사 섹션 (0이면 경쟁사 검색 안 함) | `1` |

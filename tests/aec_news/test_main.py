@@ -623,7 +623,7 @@ def test_web_and_infra_items_are_not_decoded(pipeline, monkeypatch):
 def test_scheduled_post_time_and_wait(pipeline):
     from src.aec_news.config import KST, get_config
     cfg = get_config()
-    start = datetime(2026, 11, 13, 23, 0, tzinfo=timezone.utc)          # 11/14 08:00 KST
+    start = datetime(2026, 11, 13, 22, 30, tzinfo=timezone.utc)         # 11/14 07:30 KST
     post = m.scheduled_post_time(start, cfg)
     assert post == datetime(2026, 11, 14, 8, 30, tzinfo=KST)
     late = datetime(2026, 11, 13, 23, 40, tzinfo=timezone.utc)          # 08:40 — 이미 지남 → 바로
@@ -658,4 +658,4 @@ def test_scheduler_starts_collection_lead_minutes_before_post(monkeypatch):
     m.main([])
     assert added["func"] is m.execute_scheduled and added["started"]
     fields = {f.name: str(f) for f in added["trigger"].fields}
-    assert fields["hour"] == "8" and fields["minute"] == "0"
+    assert fields["hour"] == "7" and fields["minute"] == "30"           # 07:30 수집 시작 → 08:30 게시

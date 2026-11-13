@@ -38,10 +38,11 @@ class Config:
     max_lookback_days: int = 7
 
     # 스케줄 (KST): AEC_NEWS_HOUR:MINUTE(08:30)에 Slack에 올린다. 사람 속도로 검색하면 25~30분 걸려
-    # AEC_NEWS_LEAD_MINUTES(30)분 먼저(08:00) 수집을 시작하고, 일찍 끝나면 08:30까지 기다렸다가 올린다
+    # AEC_NEWS_LEAD_MINUTES(60)분 먼저(07:30, 사용자 요청 2026-11-13) 수집을 시작하고, 일찍 끝나면 08:30까지
+    # 기다렸다가 올린다 (Google이 느리거나 재시도가 있어도 08:30을 넘기지 않게 여유를 둔다)
     schedule_hour: int = field(default_factory=lambda: int(os.environ.get("AEC_NEWS_HOUR", "8")))
     schedule_minute: int = field(default_factory=lambda: int(os.environ.get("AEC_NEWS_MINUTE", "30")))
-    lead_minutes: int = field(default_factory=lambda: int(os.environ.get("AEC_NEWS_LEAD_MINUTES", "30")))
+    lead_minutes: int = field(default_factory=lambda: int(os.environ.get("AEC_NEWS_LEAD_MINUTES", "60")))
     run_on_start: bool = field(default_factory=lambda: os.environ.get("AEC_NEWS_RUN_ON_START", "0") == "1")
     # 매체 무관 검색 (사용자 요청 2026-11-13) — 목록 밖 매체 기사는 🔎 기타 매체 섹션에 섹션당 최대 N개 소식
     web_search: bool = field(default_factory=lambda: os.environ.get("AEC_NEWS_WEB_SEARCH", "1") == "1")
